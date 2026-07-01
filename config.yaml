@@ -1,0 +1,63 @@
+# invest-skill 配置文件
+# 本文件是 invest-skill 与 invest-wiki 之间的显式契约
+# 任何路径或方法论引用变更，都需要同步修改此处并触发联动检查
+
+project:
+  name: invest-skill
+  version: "0.1.0"
+  analysis_date: "2026-07-01"
+
+# 数据与报告路径（默认在 skill 项目内部，与 wiki 隔离）
+paths:
+  data_dir: ./data
+  reports_dir: ./reports
+  db_file: ./data/invest_skill.db
+  schema_file: ./schema.sql
+
+# Wiki 知识依据（方法论文本，用于校验联动）
+# 当 wiki 中这些页面发生结构性变更时，skill 应被检查是否需要同步更新
+wiki_dependencies:
+  repo_path: ../invest-wiki          # 相对于本配置文件的 wiki 根目录
+  methodology_pages:
+    - path: "企业档案/综合报告编写规范.md"
+      purpose: "报告结构依据"
+      critical_sections:
+        - "二、frontmatter 规范"
+        - "三、正文结构"
+        - "四、每章内容规范"
+    - path: "02_stock_domain/策略研究/价值投资框架.md"
+      purpose: "估值与筛选框架依据"
+    - path: "02_stock_domain/策略研究/格雷厄姆体系.md"
+      purpose: "Graham 打分逻辑依据"
+    - path: "02_stock_domain/策略研究/费雪体系.md"
+      purpose: "成长性打分逻辑依据"
+    - path: "02_stock_domain/策略研究/多尔西护城河体系.md"
+      purpose: "护城河评估逻辑依据"
+    - path: "10_meta/未来产业每日筛选计划.md"
+      purpose: "每日筛选计划与股票池框架"
+
+# 联动检查配置
+coupling:
+  # skill 运行前是否校验 wiki 依赖页面的存在性
+  validate_wiki_refs_before_run: true
+  # 当 wiki 依赖页面变更时，skill 应输出的告警文件
+  drift_report: ./data/wiki_drift_report.json
+  # 是否阻止在 drift 未处理时生成报告
+  block_on_drift: false
+
+# 数据源配置
+data_sources:
+  tushare:
+    token_env: TUSHARE_TOKEN
+    primary: true
+  akshare:
+    primary: false
+    fallback: true
+
+# 评分阈值（与 wiki 框架对齐，但可在 skill 内独立调参）
+scoring:
+  pass_financial_health: 40
+  buy_avg_score: 75
+  buy_min_health: 60
+  observe_avg_score: 55
+  risk_free_rate: 0.022

@@ -1,0 +1,53 @@
+# invest-skill
+
+基于 invest-wiki 方法论构建的独立投研工具集。
+
+**重要**：本项目与 invest-wiki 是**两个独立项目**。数据库、报告输出均存放在本项目目录下，不混入 wiki 内容区。
+
+## 项目关系
+
+```
+/home/bazinga/
+├── invest-wiki/          # 知识库（LLM 维护的 Obsidian wiki）
+│   ├── 10_meta/公司综合分析 Skill.md
+│   ├── 10_meta/Wiki-Skill 联动规范.md
+│   └── ...
+└── invest-skill/         # 本工程：数据管道 + 分析 skill
+    ├── config.yaml       # 与 wiki 的显式契约
+    ├── schema.sql        # 自包含的数据库 schema
+    ├── company-analysis/
+    │   └── analyze_company.py
+    ├── data/             # SQLite 数据库（gitignore）
+    └── reports/          # 综合报告输出（gitignore）
+```
+
+## 快速开始
+
+```bash
+cd /home/bazinga/invest-skill
+
+# 安装依赖
+pip install -r requirements.txt
+
+# 设置 Tushare token
+export TUSHARE_TOKEN="your_token"
+
+# 运行分析
+python3 company-analysis/analyze_company.py 贵州茅台
+```
+
+## 核心设计
+
+1. **解耦**：不依赖 wiki 内部文件路径，通过 `config.yaml` 声明 wiki 依赖和方法论引用
+2. **自包含**：`schema.sql`、`config.yaml`、数据目录、报告目录都在本项目中
+3. **联动检查**：运行前校验 wiki 依赖页面是否存在；变更时生成 `data/wiki_drift_report.json`
+4. **可量化**：6 维度 0~100 打分，输出明确评级
+
+## 联动规范
+
+详见 invest-wiki 中的 [[Wiki-Skill 联动规范]]。
+
+核心原则：
+- wiki 变更方法论页面时，需检查本 skill 是否需要同步更新
+- skill 运行前校验 wiki 依赖，缺失时告警
+- 任何一方变更契约（config.yaml、schema.sql、评分阈值），需在另一方留下记录
