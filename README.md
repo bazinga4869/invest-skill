@@ -29,12 +29,24 @@ cd /home/bazinga/invest-skill
 # 安装依赖
 pip install -r requirements.txt
 
-# 设置 Tushare token
+# 设置 Tushare token（推荐写入 shell 配置文件持久化）
 export TUSHARE_TOKEN="your_token"
+
+# 或者使用 .env 文件（已加入 .gitignore）
+cp .env.example .env
+# 编辑 .env，填入真实 token
 
 # 运行分析
 python3 company-analysis/analyze_company.py 贵州茅台
 ```
+
+### Token 配置说明
+
+- **推荐**：把 `export TUSHARE_TOKEN=...` 写入 `~/.bashrc` 或 `~/.zshrc`，这样所有终端会话都可用
+- **临时**：当前终端直接 `export TUSHARE_TOKEN=...`
+- **项目级**：复制 `.env.example` 为 `.env` 并填写 token（注意：`.env` 已在 `.gitignore` 中，不会提交）
+
+**切勿把真实 token 写入 `config.yaml` 或任何会被 git 追踪的文件。**
 
 ## 核心设计
 

@@ -116,7 +116,14 @@ class TushareDataSource(DataSource):
         if token is None:
             token = os.environ.get("TUSHARE_TOKEN")
         if not token:
-            raise RuntimeError("Tushare token 未提供，且环境变量 TUSHARE_TOKEN 未设置")
+            raise RuntimeError(
+                "Tushare token 未提供，且环境变量 TUSHARE_TOKEN 未设置。\n"
+                "请执行以下操作之一：\n"
+                "  1. 当前终端：export TUSHARE_TOKEN=你的token\n"
+                "  2. 持久化：写入 ~/.bashrc 或 ~/.zshrc\n"
+                "  3. 项目级：复制 .env.example 为 .env 并填写 token\n"
+                "注意：不要把真实 token 提交到 git。"
+            )
         self.pro = ts.pro_api(token)
 
     def _safe_call(self, func, *args, **kwargs) -> pd.DataFrame:

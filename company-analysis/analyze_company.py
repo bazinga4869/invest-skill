@@ -25,6 +25,15 @@ from typing import Optional, Dict, List, Tuple
 import pandas as pd
 import numpy as np
 
+# 加载 .env 文件（如果存在）
+try:
+    from dotenv import load_dotenv
+    env_path = Path(__file__).resolve().parents[2] / ".env"
+    if env_path.exists():
+        load_dotenv(env_path)
+except ImportError:
+    pass
+
 # 把项目根目录加入路径
 SKILL_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(SKILL_ROOT))
