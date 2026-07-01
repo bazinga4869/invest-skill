@@ -25,10 +25,17 @@ invest-skill 是基于 invest-wiki 方法论的**独立工程仓库**，负责�
 | 目录 | 用途 |
 |------|------|
 | `company-analysis/` | 单公司分析 skill |
-| `shared/` | 公共工具模块 |
+| `shared/` | 公共工具模块，含 `data_source.py`（Tushare + AKShare 抽象层） |
 | `tests/` | 测试 |
 | `data/` | SQLite 数据库与 drift 报告（gitignore） |
 | `reports/` | 综合报告输出（gitignore） |
+
+## 数据源
+
+- **主源**：Tushare Pro（`TUSHARE_TOKEN`）
+- **备用源**：AKShare（免费，无需 token）
+- **抽象层**：`shared/data_source.py` 中的 `FallbackDataSource` 自动在主源失败/空数据时切换
+- 返回的 DataFrame 统一为 Tushare 风格列名，下游无感
 
 ## 修改 checklist
 

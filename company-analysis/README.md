@@ -16,8 +16,9 @@ python3 company-analysis/analyze_company.py 珀莱雅 --force-update
 
 ## 数据来源
 
-- 主：Tushare Pro
-- 备：AKShare（待接入）
+- 主：Tushare Pro（需要 `TUSHARE_TOKEN`）
+- 备：AKShare（免费，无需 token）
+- 策略：`shared/data_source.py` 先调主源，失败或空数据时自动回退到 AKShare
 - 所有数据落入 `invest-skill/data/invest_skill.db`，与 invest-wiki 隔离
 
 ## 评分体系

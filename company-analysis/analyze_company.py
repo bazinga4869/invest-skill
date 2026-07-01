@@ -7,18 +7,7 @@ Skill: 公司综合分析生成器
 输入：公司名称或股票代码
 输出：存储在 invest-skill/reports/ 目录下的综合报告（Markdown）
 
-功能：
-1. 检查本地数据库，无数据则获取，有数据则按需更新
-2. 基于 invest-wiki 评价体系进行可量化打分
-3. 按 综合报告编写规范 生成 9 章综合报告
-4. 明确标注分析日期与数据新鲜度
-5. 眼光放长：纳入 5~10 年历史财务与行业趋势
-6. 运行前校验 wiki 依赖页面是否存在（联动检查）
-
-用法：
-    python3 analyze_company.py 贵州茅台
-    python3 analyze_company.py 600519.SH
-    python3 analyze_company.py 珀莱雅 --force-update
+数据源：Tushare 为主，AKShare 为备用（通过 shared/data_source.py 自动回退）
 """
 
 import argparse
@@ -36,13 +25,21 @@ from typing import Optional, Dict, List, Tuple
 import pandas as pd
 import numpy as np
 
-# ---------------------------------------------------------------------------
-# 0. 配置加载与路径解析
-# ---------------------------------------------------------------------------
-
+# 把项目根目录加入路径
 SKILL_ROOT = Path(__file__).resolve().parents[2]
-CONFIG_PATH = SKILL_ROOT / "config.yaml"
+sys.path.insert(0, str(SKILL_ROOT))
 
+from shared.data_source import create_data_source, code_to_symbol
+
+CONFIG_PATH = SKILL_ROOT / "config.yaml"
+DATA_DIR = SKILL_ROOT / "data"
+REPORTS_DIR = SKILL_ROOT / "reports"
+DB_PATH = DATA_DIR / "invest_skill.db"
+SCHEMA_PATH = SKILL_ROOT / "schema.sql"
+
+# ---------------------------------------------------------------------------
+# 0. 配置与工具
+# ---------------------------------------------------------------------------
 
 def load_config() -> dict:
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -50,18 +47,11 @@ def load_config() -> dict:
 
 
 CONFIG = load_config()
-DATA_DIR = SKILL_ROOT / CONFIG["paths"]["data_dir"]
-REPORTS_DIR = SKILL_ROOT / CONFIG["paths"]["reports_dir"]
-DB_PATH = SKILL_ROOT / CONFIG["paths"]["db_file"]
-SCHEMA_PATH = SKILL_ROOT / CONFIG["paths"]["schema_file"]
-WIKI_ROOT = (SKILL_ROOT / CONFIG["wiki_dependencies"]["repo_path"]).resolve()
 TODAY = datetime.strptime(CONFIG["project"]["analysis_date"], "%Y-%m-%d")
-
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def get_db() -> sqlite3.Connection:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     return sqlite3.connect(DB_PATH)
 
 
@@ -78,50 +68,6 @@ def ensure_schema():
     conn.close()
 
 
-# ---------------------------------------------------------------------------
-# 1. Wiki 联动校验
-# ---------------------------------------------------------------------------
-
-def validate_wiki_dependencies() -> List[Dict]:
-    """校验 wiki 依赖页面是否存在。返回 drift 列表。"""
-    drifts = []
-    for dep in CONFIG["wiki_dependencies"]["methodology_pages"]:
-        full_path = WIKI_ROOT / dep["path"]
-        if not full_path.exists():
-            drifts.append({
-                "type": "missing",
-                "path": dep["path"],
-                "purpose": dep.get("purpose", ""),
-                "message": f"Wiki 依赖页面不存在: {dep['path']}"
-            })
-            continue
-        # 计算内容哈希，用于未来检测变更
-        content = open(full_path, "rb").read()
-        h = hashlib.sha256(content).hexdigest()[:16]
-        drifts.append({
-            "type": "ok",
-            "path": dep["path"],
-            "sha256_prefix": h,
-            "purpose": dep.get("purpose", "")
-        })
-    return drifts
-
-
-def save_drift_report(drifts: List[Dict]):
-    report_path = SKILL_ROOT / CONFIG["coupling"]["drift_report"]
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(report_path, "w", encoding="utf-8") as f:
-        json.dump({
-            "date": TODAY.strftime("%Y-%m-%d"),
-            "drifts": drifts,
-            "block_on_drift": CONFIG["coupling"]["block_on_drift"]
-        }, f, ensure_ascii=False, indent=2)
-
-
-# ---------------------------------------------------------------------------
-# 2. 工具函数
-# ---------------------------------------------------------------------------
-
 def parse_ts_code(raw: str) -> Optional[str]:
     raw = raw.strip()
     if "." in raw:
@@ -133,10 +79,6 @@ def parse_ts_code(raw: str) -> Optional[str]:
         else:
             return f"{raw}.SZ"
     return None
-
-
-def code_to_symbol(ts_code: str) -> str:
-    return ts_code.split(".")[0]
 
 
 def fmt_date(d) -> str:
@@ -165,25 +107,51 @@ def cagr(start, end, years):
 
 
 # ---------------------------------------------------------------------------
-# 3. 数据源初始化
+# 1. Wiki 联动校验
 # ---------------------------------------------------------------------------
 
-def get_tushare_pro():
-    import tushare as ts
-    token = os.environ.get(CONFIG["data_sources"]["tushare"]["token_env"])
-    if not token:
-        raise RuntimeError(f"环境变量 {CONFIG['data_sources']['tushare']['token_env']} 未设置")
-    return ts.pro_api(token)
+def validate_wiki_dependencies() -> List[Dict]:
+    drifts = []
+    wiki_root = (SKILL_ROOT / CONFIG["wiki_dependencies"]["repo_path"]).resolve()
+    for dep in CONFIG["wiki_dependencies"]["methodology_pages"]:
+        full_path = wiki_root / dep["path"]
+        if not full_path.exists():
+            drifts.append({
+                "type": "missing",
+                "path": dep["path"],
+                "purpose": dep.get("purpose", ""),
+                "message": f"Wiki 依赖页面不存在: {dep['path']}"
+            })
+            continue
+        content = open(full_path, "rb").read()
+        h = hashlib.sha256(content).hexdigest()[:16]
+        drifts.append({
+            "type": "ok",
+            "path": dep["path"],
+            "sha256_prefix": h,
+            "purpose": dep.get("purpose", "")
+        })
+    return drifts
+
+
+def save_drift_report(drifts: List[Dict]):
+    report_path = SKILL_ROOT / CONFIG["coupling"]["drift_report"]
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(report_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "date": TODAY.strftime("%Y-%m-%d"),
+            "drifts": drifts,
+            "block_on_drift": CONFIG["coupling"]["block_on_drift"]
+        }, f, ensure_ascii=False, indent=2)
 
 
 # ---------------------------------------------------------------------------
-# 4. 数据获取与更新
+# 2. 数据同步
 # ---------------------------------------------------------------------------
 
-def fetch_stock_basic(pro, ts_code: str) -> pd.DataFrame:
-    df = pro.stock_basic(ts_code=ts_code, fields="ts_code,symbol,name,fullname,exchange,list_date,delist_date,industry,area")
+def write_stock_basic(df: pd.DataFrame):
     if df.empty:
-        return df
+        return
     now = TODAY.strftime("%Y-%m-%d")
     conn = get_db()
     for _, row in df.iterrows():
@@ -194,19 +162,17 @@ def fetch_stock_basic(pro, ts_code: str) -> pd.DataFrame:
                symbol=excluded.symbol,name=excluded.name,fullname=excluded.fullname,
                exchange=excluded.exchange,list_date=excluded.list_date,
                industry=excluded.industry,area=excluded.area,updated_at=excluded.updated_at""",
-            (row["ts_code"], row["symbol"], row["name"], row.get("fullname", ""),
-             row["exchange"], row.get("list_date", ""), row.get("industry", ""),
+            (row.get("ts_code"), row.get("symbol"), row.get("name"), row.get("fullname", ""),
+             row.get("exchange", ""), row.get("list_date", ""), row.get("industry", ""),
              row.get("area", ""), now)
         )
     conn.commit()
     conn.close()
-    return df
 
 
-def fetch_daily_basic(pro, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
-    df = pro.daily_basic(ts_code=ts_code, start_date=start_date, end_date=end_date)
+def write_daily_basic(df: pd.DataFrame, ts_code: str):
     if df.empty:
-        return df
+        return
     now = TODAY.strftime("%Y-%m-%d")
     conn = get_db()
     for _, row in df.iterrows():
@@ -220,7 +186,7 @@ def fetch_daily_basic(pro, ts_code: str, start_date: str, end_date: str) -> pd.D
                ps=excluded.ps,ps_ttm=excluded.ps_ttm,dv_ratio=excluded.dv_ratio,total_mv=excluded.total_mv,
                circ_mv=excluded.circ_mv,total_share=excluded.total_share,float_share=excluded.float_share,
                free_share=excluded.free_share,updated_at=excluded.updated_at""",
-            (ts_code, row["trade_date"], row.get("close"), row.get("turnover_rate"),
+            (ts_code, row.get("trade_date"), row.get("close"), row.get("turnover_rate"),
              row.get("turnover_rate_f"), row.get("volume_ratio"), row.get("pe"),
              row.get("pe_ttm"), row.get("pb"), row.get("ps"), row.get("ps_ttm"),
              row.get("dv_ratio"), row.get("total_mv"), row.get("circ_mv"),
@@ -228,13 +194,11 @@ def fetch_daily_basic(pro, ts_code: str, start_date: str, end_date: str) -> pd.D
         )
     conn.commit()
     conn.close()
-    return df
 
 
-def fetch_daily_quote(pro, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
-    df = pro.daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
+def write_daily_quotes(df: pd.DataFrame, ts_code: str):
     if df.empty:
-        return df
+        return
     now = TODAY.strftime("%Y-%m-%d")
     conn = get_db()
     for _, row in df.iterrows():
@@ -245,31 +209,12 @@ def fetch_daily_quote(pro, ts_code: str, start_date: str, end_date: str) -> pd.D
                open=excluded.open,high=excluded.high,low=excluded.low,close=excluded.close,
                pre_close=excluded.pre_close,change=excluded.change,pct_chg=excluded.pct_chg,
                vol=excluded.vol,amount=excluded.amount,updated_at=excluded.updated_at""",
-            (ts_code, row["trade_date"], row.get("open"), row.get("high"), row.get("low"),
+            (ts_code, row.get("trade_date"), row.get("open"), row.get("high"), row.get("low"),
              row.get("close"), row.get("pre_close"), row.get("change"), row.get("pct_chg"),
              row.get("vol"), row.get("amount"), now)
         )
     conn.commit()
     conn.close()
-    return df
-
-
-def fetch_financial_table(pro, ts_code: str, table: str, fields: str, years: int = 8) -> pd.DataFrame:
-    start_date = (TODAY - timedelta(days=365 * years)).strftime("%Y%m%d")
-    end_date = TODAY.strftime("%Y%m%d")
-    if table == "income":
-        df = pro.income(ts_code=ts_code, start_date=start_date, end_date=end_date, fields=fields)
-    elif table == "balance":
-        df = pro.balance(ts_code=ts_code, start_date=start_date, end_date=end_date, fields=fields)
-    elif table == "cashflow":
-        df = pro.cashflow(ts_code=ts_code, start_date=start_date, end_date=end_date, fields=fields)
-    elif table == "fina_indicator":
-        df = pro.fina_indicator(ts_code=ts_code, start_date=start_date, end_date=end_date, fields=fields)
-    elif table == "fina_audit":
-        df = pro.fina_audit(ts_code=ts_code, start_date=start_date, end_date=end_date)
-    else:
-        raise ValueError(f"未知表: {table}")
-    return df
 
 
 def write_financial_df(df: pd.DataFrame, table: str, ts_code: str):
@@ -293,7 +238,7 @@ def write_financial_df(df: pd.DataFrame, table: str, ts_code: str):
 
 
 # ---------------------------------------------------------------------------
-# 5. 数据新鲜度检查
+# 3. 数据新鲜度检查
 # ---------------------------------------------------------------------------
 
 def get_latest_trade_date(conn: sqlite3.Connection, ts_code: str) -> Optional[str]:
@@ -319,7 +264,7 @@ def is_stale(latest_date: Optional[str], max_days: int = 5) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 6. 打分体系
+# 4. 打分体系
 # ---------------------------------------------------------------------------
 
 class ScoreCard:
@@ -651,7 +596,7 @@ def score_ten_bagger(conn: sqlite3.Connection, ts_code: str) -> Tuple[float, str
 
 
 # ---------------------------------------------------------------------------
-# 7. 报告生成
+# 5. 报告生成
 # ---------------------------------------------------------------------------
 
 def build_report(ts_code: str, name: str, conn: sqlite3.Connection) -> str:
@@ -801,10 +746,10 @@ def build_report(ts_code: str, name: str, conn: sqlite3.Connection) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 8. 主流程
+# 6. 主流程
 # ---------------------------------------------------------------------------
 
-def resolve_ts_code(pro, raw: str) -> Tuple[str, str]:
+def resolve_ts_code(ds, raw: str) -> Tuple[str, str]:
     ts_code = parse_ts_code(raw)
     if ts_code:
         conn = get_db()
@@ -812,7 +757,8 @@ def resolve_ts_code(pro, raw: str) -> Tuple[str, str]:
         conn.close()
         if row:
             return ts_code, row[0]
-        df = fetch_stock_basic(pro, ts_code)
+        df = ds.get_stock_basic(ts_code)
+        write_stock_basic(df)
         if not df.empty:
             return ts_code, df.iloc[0]["name"]
         raise ValueError(f"无法找到代码: {raw}")
@@ -823,19 +769,25 @@ def resolve_ts_code(pro, raw: str) -> Tuple[str, str]:
     if row:
         return row[0], row[1]
 
-    df = pro.stock_basic(name=raw, fields="ts_code,symbol,name")
-    if df.empty:
-        df = pro.stock_basic(exchange='', list_status='L', fields='ts_code,symbol,name')
-        df = df[df['name'].str.contains(raw, na=False)]
-    if df.empty:
-        raise ValueError(f"无法找到公司: {raw}")
-    ts_code = df.iloc[0]["ts_code"]
-    name = df.iloc[0]["name"]
-    fetch_stock_basic(pro, ts_code)
-    return ts_code, name
+    # 按名称远程查：AKShare 没有直接按名称查的接口，这里用 spot 全表过滤
+    try:
+        import akshare as ak
+        spot = ak.stock_zh_a_spot_em()
+        matched = spot[spot["名称"].str.contains(raw, na=False)]
+        if not matched.empty:
+            symbol = matched.iloc[0]["代码"]
+            name = matched.iloc[0]["名称"]
+            ts_code = f"{symbol}.SH" if symbol[0] in ("6", "5", "9") else f"{symbol}.SZ"
+            df = ds.get_stock_basic(ts_code)
+            write_stock_basic(df)
+            return ts_code, name
+    except Exception as e:
+        print(f"[WARN] AKShare 名称匹配失败: {e}")
+
+    raise ValueError(f"无法找到公司: {raw}")
 
 
-def sync_company_data(pro, ts_code: str, force: bool = False):
+def sync_company_data(ds, ts_code: str, force: bool = False):
     conn = get_db()
     today_str = TODAY.strftime("%Y%m%d")
     start_10y = (TODAY - timedelta(days=365 * 10)).strftime("%Y%m%d")
@@ -844,29 +796,23 @@ def sync_company_data(pro, ts_code: str, force: bool = False):
     if force or is_stale(latest_trade, max_days=5):
         start = start_10y if not latest_trade else latest_trade
         print(f"[SYNC] 更新日线/估值: {ts_code} 从 {start} 至 {today_str}")
-        fetch_daily_quote(pro, ts_code, start, today_str)
-        fetch_daily_basic(pro, ts_code, start, today_str)
+        df_quote = ds.get_daily_quotes(ts_code, start, today_str)
+        write_daily_quotes(df_quote, ts_code)
+        df_basic = ds.get_daily_basic(ts_code, start, today_str)
+        write_daily_basic(df_basic, ts_code)
 
     latest_fin = get_latest_financial_end_date(conn, ts_code)
     if force or is_stale(latest_fin, max_days=120):
         print(f"[SYNC] 更新财务报表: {ts_code}")
-        fields_inc = "ts_code,ann_date,f_ann_date,end_date,report_type,comp_type,total_revenue,revenue,total_cogs,sell_exp,admin_exp,fin_exp,rd_exp,operate_profit,non_oper_income,total_profit,n_income,n_income_attr_p"
-        df_inc = fetch_financial_table(pro, ts_code, "income", fields_inc, years=10)
+        df_inc = ds.get_income(ts_code, start_10y, today_str)
         write_financial_df(df_inc, "income", ts_code)
-
-        fields_bal = "ts_code,ann_date,f_ann_date,end_date,report_type,total_assets,total_liab,total_hldr_eqy_exc_min_int,total_hldr_eqy_inc_min_int,money_cap,trad_asset,notes_receiv,accounts_receiv,inventories,goodwill,intan_assets,fix_assets,total_nca,st_borr,lt_borr,bonds_payable,total_cur_liab,total_noncur_liab,total_share"
-        df_bal = fetch_financial_table(pro, ts_code, "balance", fields_bal, years=10)
+        df_bal = ds.get_balance(ts_code, start_10y, today_str)
         write_financial_df(df_bal, "balance", ts_code)
-
-        fields_cf = "ts_code,ann_date,f_ann_date,end_date,report_type,c_cash_equ_end_period,n_cashflow_act,n_cashflow_inv_act,n_cash_flows_fnc_act,free_cash_flow"
-        df_cf = fetch_financial_table(pro, ts_code, "cashflow", fields_cf, years=10)
+        df_cf = ds.get_cashflow(ts_code, start_10y, today_str)
         write_financial_df(df_cf, "cashflow", ts_code)
-
-        fields_fina = "ts_code,ann_date,end_date,roe,roe_waa,roe_dt,roic,grossprofit_margin,netprofit_margin,op_yoy,netprofit_yoy,tr_yoy,or_yoy,assets_yoy,equity_yoy,debt_to_assets,current_ratio,quick_ratio,cash_ratio,ocf_to_profit"
-        df_fina = fetch_financial_table(pro, ts_code, "fina_indicator", fields_fina, years=10)
+        df_fina = ds.get_fina_indicator(ts_code, start_10y, today_str)
         write_financial_df(df_fina, "fina_indicators", ts_code)
-
-        df_audit = fetch_financial_table(pro, ts_code, "fina_audit", "", years=10)
+        df_audit = ds.get_fina_audit(ts_code, start_10y, today_str)
         write_financial_df(df_audit, "fina_audit", ts_code)
 
     conn.close()
@@ -885,7 +831,8 @@ def main():
     print(f"[INFO] 解析输入: {args.company}")
 
     ensure_schema()
-    pro = get_tushare_pro()
+    ds = create_data_source(CONFIG)
+    print(f"[INFO] 数据源: {ds.name}")
 
     if not args.skip_wiki_check and CONFIG["coupling"]["validate_wiki_refs_before_run"]:
         drifts = validate_wiki_dependencies()
@@ -901,10 +848,10 @@ def main():
         else:
             print("[OK] wiki 依赖校验通过")
 
-    ts_code, name = resolve_ts_code(pro, args.company)
+    ts_code, name = resolve_ts_code(ds, args.company)
     print(f"[INFO] 已定位: {name} ({ts_code})")
 
-    sync_company_data(pro, ts_code, force=args.force_update)
+    sync_company_data(ds, ts_code, force=args.force_update)
 
     conn = get_db()
     md = build_report(ts_code, name, conn)

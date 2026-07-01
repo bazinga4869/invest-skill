@@ -40,10 +40,16 @@ python3 company-analysis/analyze_company.py 贵州茅台
 
 1. **解耦**：不依赖 wiki 内部文件路径，通过 `config.yaml` 声明 wiki 依赖和方法论引用
 2. **自包含**：`schema.sql`、`config.yaml`、数据目录、报告目录都在本项目中
-3. **联动检查**：运行前校验 wiki 依赖页面是否存在；变更时生成 `data/wiki_drift_report.json`
-4. **可量化**：6 维度 0~100 打分，输出明确评级
+3. **数据源抽象**：`shared/data_source.py` 实现 Tushare 主源 + AKShare 备用源，主源失败自动回退
+4. **联动检查**：运行前校验 wiki 依赖页面是否存在；变更时生成 `data/wiki_drift_report.json`
+5. **可量化**：6 维度 0~100 打分，输出明确评级
 
-## 联动规范
+## 数据源
+
+- **主源**：Tushare Pro（需要 `TUSHARE_TOKEN`）
+- **备用源**：AKShare（免费，无需 token）
+- **策略**：每次请求先走 Tushare；若失败或返回空，自动切换到 AKShare
+- 所有数据统一清洗为 Tushare 风格列名，下游无感
 
 详见 invest-wiki 中的 [[Wiki-Skill 联动规范]]。
 
