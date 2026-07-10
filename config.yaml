@@ -1,53 +1,69 @@
-# invest-skill 配置文件
-# 本文件是 invest-skill 与 invest-wiki 之间的显式契约
-# 任何路径或方法论引用变更，都需要同步修改此处并触发联动检查
-
 project:
   name: invest-skill
-  version: "0.1.0"
-  analysis_date: "2026-07-01"
-
-# 数据与报告路径（默认在 skill 项目内部，与 wiki 隔离）
+  version: 0.1.0
+  analysis_date: '2026-07-09'
 paths:
   data_dir: ./data
   reports_dir: ./reports
+  invest_tool_dir: ./reports/invest_tool
+  ai_berkshire_dir: ./reports/ai_berkshire
   db_file: ./data/invest_skill.db
   schema_file: ./schema.sql
-
-# Wiki 知识依据（方法论文本，用于校验联动）
-# 当 wiki 中这些页面发生结构性变更时，skill 应被检查是否需要同步更新
 wiki_dependencies:
-  repo_path: ../invest-wiki          # 相对于本配置文件的 wiki 根目录
+  repo_path: ../invest-wiki
+  expert_panel:
+    base_path: 04_stock-analysis-expert
+    schema: 04_stock-analysis-expert/_schema.md
+    index: 04_stock-analysis-expert/index.md
+    panel: 04_stock-analysis-expert/experts/_panel.md
+    process: 04_stock-analysis-expert/process/深度分析流程.md
+    experts:
+    - path: 04_stock-analysis-expert/experts/01-财务排雷官.md
+      role: financial-auditor
+      priority: 1
+    - path: 04_stock-analysis-expert/experts/02-价值估值师.md
+      role: value-valuator
+      priority: 2
+    - path: 04_stock-analysis-expert/experts/03-成长质量师.md
+      role: growth-assessor
+      priority: 3
+      framework:
+      - Fisher
+      - Lynch
+    - path: 04_stock-analysis-expert/experts/04-护城河分析师.md
+      role: moat-analyst
+      priority: 4
+    - path: 04_stock-analysis-expert/experts/05-认知风控官.md
+      role: cognitive-controller
+      priority: 5
+    - path: 04_stock-analysis-expert/experts/06-宏观周期师.md
+      role: macro-cyclist
+      priority: 6
+    - path: 04_stock-analysis-expert/experts/07-管理层审计师.md
+      role: management-auditor
+      priority: 7
+    adjudicator:
+    - path: 04_stock-analysis-expert/adjudicator/裁判长-多框架裁判规则.md
+      role: adjudicator
+    - path: 04_stock-analysis-expert/adjudicator/案例库-裁判先例.md
+      role: case-library
+    cache: 04_stock-analysis-expert/_cache.json
   methodology_pages:
-    - path: "企业档案/综合报告编写规范.md"
-      purpose: "报告结构依据"
-      critical_sections:
-        - "二、frontmatter 规范"
-        - "三、正文结构"
-        - "四、每章内容规范"
-    - path: "02_stock_domain/策略研究/价值投资框架.md"
-      purpose: "估值与筛选框架依据"
-    - path: "02_stock_domain/策略研究/格雷厄姆体系.md"
-      purpose: "Graham 打分逻辑依据"
-    - path: "02_stock_domain/策略研究/费雪体系.md"
-      purpose: "成长性打分逻辑依据"
-    - path: "02_stock_domain/策略研究/多尔西护城河体系.md"
-      purpose: "护城河评估逻辑依据"
-    - path: "10_meta/未来产业每日筛选计划.md"
-      purpose: "每日筛选计划与股票池框架"
-
-# 联动检查配置
+  - path: 企业档案/综合报告编写规范.md
+    purpose: 报告结构依据
+    critical_sections:
+    - 二、frontmatter 规范
+    - 三、正文结构
+    - 四、每章内容规范
+  - path: 02_stock_domain/策略研究/价值投资框架.md
+    purpose: 估值与筛选框架依据（已逐步由专家团替代）
+  - path: 10_meta/未来产业每日筛选计划.md
+    purpose: 每日筛选计划与股票池框架
 coupling:
-  # skill 运行前是否校验 wiki 依赖页面的存在性
   validate_wiki_refs_before_run: true
-  # 当 wiki 依赖页面变更时，skill 应输出的告警文件
   drift_report: ./data/wiki_drift_report.json
-  # 是否阻止在 drift 未处理时生成报告
   block_on_drift: false
-
-# 数据源配置
-# Tushare 为主，AKShare 为备用源
-# 主源失败或返回空时，自动切换到备用源
+  improvement_candidates: ./data/improvement_candidates.json
 data_sources:
   tushare:
     token_env: TUSHARE_TOKEN
@@ -56,11 +72,3 @@ data_sources:
   akshare:
     primary: false
     fallback: true
-
-# 评分阈值（与 wiki 框架对齐，但可在 skill 内独立调参）
-scoring:
-  pass_financial_health: 40
-  buy_avg_score: 75
-  buy_min_health: 60
-  observe_avg_score: 55
-  risk_free_rate: 0.022

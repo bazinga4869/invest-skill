@@ -1,56 +1,130 @@
-# CLAUDE.md — invest-skill
+# CLAUDE.md — invest-skill 项目配置
 
-本文件为 Claude Code / 其他 AI Agent 提供 invest-skill 项目的协作规范。
+> ⚠️ **本文件是项目工程配置，不是 skill 定义。Skill 定义在 `SKILL.md`。**
 
-## 项目定位
+## Skill 入口
 
-invest-skill 是基于 invest-wiki 方法论的**独立工程仓库**，负责：
-- 本地投研数据库维护
-- 量化筛选与分析 skill
-- 综合报告生成
+分析协议、专家团架构、spawn 命令模板等全部在 `SKILL.md` 中定义。本文件只包含项目基础设施配置。
 
-**它不是 wiki 的一部分**。数据库、报告、代码均存放在本项目内，不向 invest-wiki 写入内容。
+## 双管道日报系统
 
-## 与 invest-wiki 的关系
+invest-skill 是一个**双管道每日分析系统**的 Pipe A。每天分析 2 家公司，每家公司产出两份**完全独立**的报告：
 
-- **知识来源**：invest-wiki 是方法论来源（如 综合报告编写规范、价值投资框架）
-- **显式契约**：`config.yaml` 中声明了所有 wiki 依赖页面
-- **联动检查**：`analyze_company.py` 运行前会校验这些 wiki 页面是否存在
-- **双向感知**：
-  - 修改 invest-wiki 的方法论页面后，应检查 invest-skill 是否需要同步
-  - 修改 invest-skill 的评分逻辑/报告结构后，应检查是否与 wiki 方法论冲突
+```
+每日 cron（10:00 / 14:30）
+  │
+  ├── Pipe A：invest-skill（本工程）
+  │   ├── 触发：scripts/cron_trigger.sh → claude -p（独立新会话）
+  │   ├── 数据源：Tushare → SQLite（data_tools.py）
+  │   ├── 方法论：invest-wiki/04_stock-analysis-expert/ 7+1 专家团
+  │   └── 报告：reports/invest_tool/<code>.md  （每公司一个文件）
+  │
+  └── Pipe B：ai-berkshire（独立工程 ~/ai-berkshire/）
+      ├── 数据源：新浪财经（sina_finance.py）
+      ├── 方法论：巴菲特-芒格-段永平-李录 四大师八步框架
+      └── 报告：reports/ai_berkshire/<code>.md  （每公司一个文件，增量修订）
+```
+
+**关键约束**：
+- 🚫 两份报告完全独立，不互相引用、不汇总、不交叉验证
+- 🚫 invest-skill 不得使用新浪数据；ai-berkshire 不得使用 Tushare 数据
+- 🚫 不得修改 ai-berkshire 的任何已有文件
+
+### 自动分析 vs 手动分析
+
+| | cron 自动分析 | 用户手动分析 |
+|---|---|---|
+| 触发方式 | `scripts/cron_trigger.sh` → `claude -p` | 用户对话中直接指令 |
+| 选股范围 | 全 A 股（排除 688 科创板、8xx 北交所、ST） | 用户指定 |
+| 跳过规则 | 5 天内已分析过 → 跳过，换下一家 | 不跳过，强制从头完整分析 |
+| 状态文件 | `data/auto_state.json` | 不更新 |
+| 报告路径 | `reports/invest_tool/<code>.md` | 同路径（覆盖更新） |
 
 ## 目录规范
 
 | 目录 | 用途 |
 |------|------|
-| `company-analysis/` | 单公司分析 skill |
-| `shared/` | 公共工具模块，含 `data_source.py`（Tushare + AKShare 抽象层） |
-| `tests/` | 测试 |
-| `data/` | SQLite 数据库与 drift 报告（gitignore） |
-| `reports/` | 综合报告输出（gitignore） |
+| `SKILL.md` | **Skill 定义**（分析协议、专家团架构） |
+| `shared/data_tools.py` | 数据获取工具（纯取数 + 基础数学） |
+| `shared/data_source.py` | Tushare + AKShare 抽象层 |
+| `data/` | SQLite 数据库 |
+| `reports/` | 分析报告输出 |
+| `config.yaml` | 项目配置 |
 
-## 数据源
+## Wiki 联动
 
-- **主源**：Tushare Pro（`TUSHARE_TOKEN`）
-- **备用源**：AKShare（免费，无需 token）
-- **抽象层**：`shared/data_source.py` 中的 `FallbackDataSource` 自动在主源失败/空数据时切换
-- 返回的 DataFrame 统一为 Tushare 风格列名，下游无感
+专家团配置来自 `../invest-wiki/04_stock-analysis-expert/`。wiki 的 `_schema.md` 定义了自迭代机制：
+- wiki 中专家依赖的知识页面发生结构性变更时，专家团按自迭代机制更新
+- 每次分析前检查 `_cache.json` 中的 `expert_versions`，若版本落后超过 7 天，提示检查 wiki 更新
+- 分析完成后，将可复用的通用洞见回流到 wiki 对应的案例库
 
-## 修改 checklist
+## 跨管道对比迭代（第八步）
 
-每次修改本 skill 后：
+每次 Pipe A 分析完成后，自动触发 Pipe B（ai-berkshire）→ 四维对比 → 差距记录到 `data/improvement_candidates.json`。
 
-1. 检查 `config.yaml` 中的 `wiki_dependencies` 是否仍准确
-2. 若修改了评分逻辑或报告结构，检查 invest-wiki 中对应方法论页面是否需要同步更新
-3. 在 `data/wiki_drift_report.json` 中无未处理 drift 时再发布
-4. 更新本 README.md 与 `company-analysis/README.md`
+#### 自动触发 Pipe B
 
-## 跨项目协调
+```bash
+TODAY=$(date +%Y-%m-%d)
+CODE="<ts_code>"
+NAME="<公司名>"
+REPORT_B="reports/ai_berkshire/${CODE}.md"
 
-invest-wiki 中的协调入口：
-- [[Wiki-Skill 联动规范]]
-- [[公司综合分析 Skill]]
-- `10_meta/shared-memory.md`
+if [ -f "$REPORT_B" ]; then
+    echo "Pipe B 报告已存在，跳过生成"
+else
+    SHORT="${CODE%.*}"
+    EXCH="${CODE##*.}"
+    if [ "$EXCH" = "SH" ]; then SINA_CODE="SH${SHORT}"; else SINA_CODE="SZ${SHORT}"; fi
 
-修改 invest-skill 前，建议先读取 invest-wiki 的上述页面。
+    cd ~/ai-berkshire
+    claude --bare -p "
+分析 ${NAME}（${CODE}，新浪代码 ${SINA_CODE}）。
+
+**数据获取**：所有数据必须从 tools/sina_finance.py 获取。
+  - python3 tools/sina_finance.py all ${SINA_CODE}
+
+**分析要求**：按 ai-berkshire 四大师八步框架完成完整分析。
+
+**输出**：报告保存到 ~/invest-skill/${REPORT_B}
+" --permission-mode bypassPermissions --allowedTools "Read,Bash,Write,Edit" 2>&1 | tail -5
+fi
+```
+
+#### 四维对比（只找差距，不找共识）
+
+| 维度 | 对比问题 |
+|------|---------|
+| **数据** | ai-berkshire 有哪些数据 invest-skill 没拿到？ |
+| **方法论** | ai-berkshire 发现了什么 7+1 专家团遗漏的风险/机会？ |
+| **结论** | 两份报告的评级有实质性分歧吗？根源是什么？ |
+| **表达** | ai-berkshire 的报告结构/叙事方式是否更清晰？ |
+
+差距记录到 `data/improvement_candidates.json`，通过 3 道质量门禁（实质差距、可操作性、独立性）。
+
+## 持续进化闭环
+
+```
+每次双管道分析完成
+       │
+       ▼
+读 Pipe B 报告 → 四维对比
+       │
+       ▼
+发现差距? ── NO ──→ 跳过
+       │
+      YES
+       │
+       ▼
+记录到 data/improvement_candidates.json
+       │
+       ├── target: skill → 修改 SKILL.md / config.yaml / data_tools.py
+       ├── target: wiki  → 修改 invest-wiki 专家文件或方法论页面
+       └── target: data  → 扩展 data_tools.py 数据获取能力
+       │
+       ▼
+人工定期 review → 落地 → 标记 resolved
+       │
+       ▼
+下次分析时 skill 和 wiki 已进化 → 报告质量螺旋上升
+```

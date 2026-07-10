@@ -12,6 +12,7 @@
 import os
 import time
 import logging
+import re
 from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Optional
@@ -74,6 +75,11 @@ class DataSource(ABC):
         pass
 
     @abstractmethod
+    def get_all_stocks(self) -> pd.DataFrame:
+        """返回全部 A 股基础信息，用于按名称搜索"""
+        pass
+
+    @abstractmethod
     def get_daily_quotes(self, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         """返回日线 DataFrame，列：trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount"""
         pass
@@ -101,6 +107,35 @@ class DataSource(ABC):
 
     @abstractmethod
     def get_fina_audit(self, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
+        pass
+
+    @abstractmethod
+    def get_forecast(self, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """获取业绩预告数据。返回字段：ts_code, ann_date, end_date, type, p_change_min,
+        p_change_max, net_profit_min, net_profit_max, last_parent_net, summary, change_reason"""
+        pass
+
+    @abstractmethod
+    def get_annual_report_text(self, ts_code: str, report_year: str) -> dict:
+        """获取年报/半年报/季报文本。
+        返回结构化 dict：
+        {
+            "ts_code": "002444.SZ",
+            "report_year": "2024",
+            "report_type": "annual",
+            "ann_date": "20240427",
+            "title": "2024年年度报告",
+            "source_url": "...",
+            "sections": {
+                "经营情况讨论与分析": "...",
+                "核心竞争力分析": "...",
+                "公司未来发展的展望": "...",
+                "可能面对的风险": "...",
+                "募集资金使用": "..."
+            },
+            "full_text": "..."
+        }
+        """
         pass
 
 
@@ -140,6 +175,12 @@ class TushareDataSource(DataSource):
                              fields="ts_code,symbol,name,fullname,exchange,list_date,delist_date,industry,area")
         return df
 
+    def get_all_stocks(self) -> pd.DataFrame:
+        """获取全部 A 股列表。"""
+        df = self._safe_call(self.pro.stock_basic, exchange='', list_status='L',
+                             fields="ts_code,symbol,name,fullname,exchange,list_date,delist_date,industry,area")
+        return df
+
     def get_daily_quotes(self, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         df = self._safe_call(self.pro.daily, ts_code=ts_code, start_date=start_date, end_date=end_date)
         if not df.empty:
@@ -164,7 +205,7 @@ class TushareDataSource(DataSource):
                   "total_hldr_eqy_exc_min_int,total_hldr_eqy_inc_min_int,money_cap,trad_asset,notes_receiv,"
                   "accounts_receiv,inventories,goodwill,intan_assets,fix_assets,total_nca,st_borr,lt_borr,"
                   "bonds_payable,total_cur_liab,total_noncur_liab,total_share")
-        return self._safe_call(self.pro.balance, ts_code=ts_code, start_date=start_date, end_date=end_date, fields=fields)
+        return self._safe_call(self.pro.balancesheet, ts_code=ts_code, start_date=start_date, end_date=end_date, fields=fields)
 
     def get_cashflow(self, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         fields = ("ts_code,ann_date,f_ann_date,end_date,report_type,c_cash_equ_end_period,n_cashflow_act,"
@@ -179,6 +220,13 @@ class TushareDataSource(DataSource):
 
     def get_fina_audit(self, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         return self._safe_call(self.pro.fina_audit, ts_code=ts_code, start_date=start_date, end_date=end_date)
+
+    def get_forecast(self, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
+        return self._safe_call(self.pro.forecast, ts_code=ts_code, start_date=start_date, end_date=end_date)
+
+    def get_annual_report_text(self, ts_code: str, report_year: str) -> dict:
+        """Tushare 暂不直接提供年报全文，抛出异常让 fallback 到 AKShare 处理。"""
+        raise NotImplementedError("Tushare 数据源不支持年报全文抓取，请使用 AKShare 备用源")
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +269,34 @@ class AKShareDataSource(DataSource):
                 "industry": row.get("所属行业", ""),
                 "area": ""
             }])
+
+    def get_all_stocks(self) -> pd.DataFrame:
+        """从全市场 spot 获取全部 A 股。"""
+        try:
+            df = self.ak.stock_zh_a_spot_em()
+        except Exception as e:
+            logger.warning(f"AKShare 全市场股票获取失败: {e}")
+            return pd.DataFrame()
+        if df.empty:
+            return df
+        result = []
+        for _, row in df.iterrows():
+            symbol = str(row.get("代码", ""))
+            if not symbol or len(symbol) != 6:
+                continue
+            ts_code = f"{symbol}.SH" if symbol[0] in ("6", "5", "9") else f"{symbol}.SZ"
+            result.append({
+                "ts_code": ts_code,
+                "symbol": symbol,
+                "name": row.get("名称", ""),
+                "fullname": "",
+                "exchange": code_to_exchange(ts_code),
+                "list_date": "",
+                "delist_date": "",
+                "industry": row.get("所属行业", ""),
+                "area": ""
+            })
+        return pd.DataFrame(result)
 
         # stock_individual_info_em 返回 key-value 形式
         info = dict(zip(df["item"].astype(str), df["value"]))
@@ -318,8 +394,13 @@ class AKShareDataSource(DataSource):
     def _get_financial_report_sina(self, ts_code: str, report_type: str, start_date: str, end_date: str) -> pd.DataFrame:
         """通用财务报表获取（AKShare 备用）。report_type: 资产负债表/利润表/现金流量表"""
         symbol = self._symbol(ts_code)
+        # AKShare 对于深交所股票需要 sz 前缀，上交所 sh 前缀
+        if ts_code.endswith(".SZ"):
+            ak_symbol = f"sz{symbol}"
+        else:
+            ak_symbol = f"sh{symbol}"
         try:
-            df = self.ak.stock_financial_report_sina(stock=symbol, symbol=report_type)
+            df = self.ak.stock_financial_report_sina(stock=ak_symbol, symbol=report_type)
         except Exception as e:
             logger.warning(f"AKShare {report_type} 获取失败: {e}")
             return pd.DataFrame()
@@ -327,30 +408,40 @@ class AKShareDataSource(DataSource):
         if df.empty:
             return df
 
-        # AKShare 返回列名可能包含日期（如 '2022-12-31'），第一列通常是项目/科目
-        # 我们需要把列名转置：把日期列变成 end_date 行
-        first_col = df.columns[0]
-        id_vars = [first_col]
-        date_cols = [c for c in df.columns[1:] if isinstance(c, str) and len(c.replace("-", "")) == 8]
-
-        if not date_cols:
+        # stock_financial_report_sina 返回的格式：第一列通常是日期列（"报告日"等），其余列为财务科目
+        # 已经是标准行列格式，不需要 pivot
+        # 查找日期列：优先匹配名称含"报告日/日期"的列，其次检查列值是否像日期
+        date_col = None
+        for col in df.columns:
+            col_str = str(col)
+            if "报告日" in col_str or "日期" in col_str or "报告期" in col_str:
+                date_col = col
+                break
+        if date_col is None:
+            # 回退：检查第一列的值是否匹配日期格式
+            first_col = df.columns[0]
+            sample = str(df[first_col].iloc[0]) if not df.empty else ""
+            if len(sample.replace("-", "")) == 8 and sample.replace("-", "").isdigit():
+                date_col = first_col
+        if date_col is None:
+            logger.warning(f"AKShare {report_type}: 无法识别日期列，列名={list(df.columns)[:5]}")
             return pd.DataFrame()
-
-        melted = df.melt(id_vars=id_vars, value_vars=date_cols, var_name="end_date", value_name="value")
-        melted["end_date"] = melted["end_date"].apply(normalize_date_hyphen)
-        # 透视：每个科目一行日期，每个日期一行
-        pivot = melted.pivot_table(index="end_date", columns=first_col, values="value", aggfunc="first").reset_index()
-        pivot.columns.name = None
-        pivot = pivot.rename_axis(None, axis=1)
+        df = df.rename(columns={date_col: "end_date"})
+        df["end_date"] = df["end_date"].apply(normalize_date_hyphen)
 
         # 过滤日期范围
-        pivot = pivot[(pivot["end_date"] >= normalize_date_hyphen(start_date)) &
-                      (pivot["end_date"] <= normalize_date_hyphen(end_date))]
-        pivot["ts_code"] = ts_code
-        pivot["ann_date"] = ""
-        pivot["f_ann_date"] = ""
-        pivot["report_type"] = ""
-        return pivot
+        start_norm = normalize_date_hyphen(start_date)
+        end_norm = normalize_date_hyphen(end_date)
+        df = df[(df["end_date"] >= start_norm) & (df["end_date"] <= end_norm)]
+
+        if df.empty:
+            return df
+
+        df["ts_code"] = ts_code
+        df["ann_date"] = ""
+        df["f_ann_date"] = ""
+        df["report_type"] = ""
+        return df
 
     def get_income(self, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         df = self._get_financial_report_sina(ts_code, "利润表", start_date, end_date)
@@ -425,7 +516,7 @@ class AKShareDataSource(DataSource):
     def get_fina_indicator(self, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         symbol = self._symbol(ts_code)
         try:
-            df = self.ak.stock_financial_analysis_indicator(symbol=symbol)
+            df = self.ak.stock_financial_abstract_ths(symbol=symbol, indicator="按报告期")
         except Exception as e:
             logger.warning(f"AKShare 财务指标获取失败: {e}")
             return pd.DataFrame()
@@ -433,55 +524,243 @@ class AKShareDataSource(DataSource):
         if df.empty:
             return df
 
-        # AKShare 返回列名通常是报告期，第一列是指标名称
-        # 格式类似 Tushare fina_indicator，但列名可能是日期
-        first_col = df.columns[0]
-        date_cols = [c for c in df.columns[1:] if isinstance(c, str) and len(c.replace("-", "")) == 8]
-        if not date_cols:
-            return pd.DataFrame()
-
-        melted = df.melt(id_vars=[first_col], value_vars=date_cols, var_name="end_date", value_name="value")
-        melted["end_date"] = melted["end_date"].apply(normalize_date_hyphen)
-        pivot = melted.pivot_table(index="end_date", columns=first_col, values="value", aggfunc="first").reset_index()
-        pivot.columns.name = None
-        pivot = pivot.rename_axis(None, axis=1)
-        pivot = pivot[(pivot["end_date"] >= normalize_date_hyphen(start_date)) &
-                      (pivot["end_date"] <= normalize_date_hyphen(end_date))]
-        pivot["ts_code"] = ts_code
-        pivot["ann_date"] = ""
-
-        # 常见指标映射
+        # 列名映射
         col_map = {
+            "报告期": "end_date",
             "净资产收益率": "roe",
-            "净资产收益率(扣除非经常性损益)": "roe_dt",
-            "加权平均净资产收益率": "roe_waa",
-            "投入资本回报率": "roic",
+            "净资产收益率-摊薄": "roe_dt",
             "销售毛利率": "grossprofit_margin",
             "销售净利率": "netprofit_margin",
-            "营业利润率": None,
-            "营业收入同比增长率": "tr_yoy",
+            "营业总收入同比增长率": "tr_yoy",
             "净利润同比增长率": "netprofit_yoy",
-            "营业利润同比增长率": "op_yoy",
-            "总资产同比增长率": "assets_yoy",
-            "净资产同比增长率": "equity_yoy",
             "资产负债率": "debt_to_assets",
             "流动比率": "current_ratio",
             "速动比率": "quick_ratio",
-            "现金比率": "cash_ratio",
             "每股经营现金流": "ocf_to_profit",
         }
-        for cn, en in col_map.items():
-            if en and cn in pivot.columns:
-                pivot[en] = pd.to_numeric(pivot[cn].astype(str).str.replace(",", "").str.replace("%", ""), errors="coerce")
-                # 百分比可能需要除以 100
-                if en in ["roe", "roe_dt", "roe_waa", "roic", "grossprofit_margin", "netprofit_margin",
-                          "tr_yoy", "netprofit_yoy", "op_yoy", "assets_yoy", "equity_yoy", "debt_to_assets"]:
-                    pivot[en] = pivot[en] / 100.0
-        return pivot
+        df = df.rename(columns=col_map)
+
+        # 百分比字段转为数值（保持与 Tushare 一致的百分比格式，如 24.62 表示 24.62%）
+        pct_fields = ["roe", "roe_dt", "grossprofit_margin", "netprofit_margin",
+                       "tr_yoy", "netprofit_yoy", "debt_to_assets"]
+        for field in pct_fields:
+            if field in df.columns:
+                df[field] = df[field].astype(str).str.replace(",", "").str.replace("%", "")
+                df[field] = pd.to_numeric(df[field], errors="coerce")
+
+        # 比率字段直接转数值
+        ratio_fields = ["current_ratio", "quick_ratio", "ocf_to_profit"]
+        for field in ratio_fields:
+            if field in df.columns:
+                df[field] = pd.to_numeric(df[field].astype(str).str.replace(",", ""), errors="coerce")
+
+        # 标准化日期
+        df["end_date"] = df["end_date"].apply(normalize_date_hyphen)
+
+        # 过滤日期范围
+        start_norm = normalize_date_hyphen(start_date)
+        end_norm = normalize_date_hyphen(end_date)
+        df = df[(df["end_date"] >= start_norm) & (df["end_date"] <= end_norm)]
+
+        if df.empty:
+            return df
+
+        df["ts_code"] = ts_code
+        df["ann_date"] = ""
+        return df
 
     def get_fina_audit(self, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         # AKShare 暂无标准审计意见接口，返回空
         return pd.DataFrame()
+
+    def get_forecast(self, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
+        # AKShare 暂无业绩预告接口，返回空（依赖主源 Tushare）
+        return pd.DataFrame()
+
+    def get_annual_report_text(self, ts_code: str, report_year: str) -> dict:
+        """
+        通过巨潮资讯网 API 获取年报/半年报/三季报 PDF，解析为结构化文本。
+        返回 dict，包含 sections 和 full_text。
+        """
+        symbol = self._symbol(ts_code)
+        exchange = "sh" if ts_code.endswith(".SH") else "sz"
+        column = "sse" if exchange == "sh" else "szse"
+
+        # 分类映射：年报、半年报、三季报、一季报
+        category_map = {
+            "annual": "category_ndbg_szsh",
+            "semi-annual": "category_bndbg_szsh",
+            "q3": "category_sjdbg_szsh",
+            "q1": "category_yjdbg_szsh",
+        }
+
+        import requests
+        import io
+        import pdfplumber
+        from datetime import datetime
+
+        # 获取 orgId
+        org_id = None
+        try:
+            stock_json_url = f"http://www.cninfo.com.cn/new/data/{column}_stock.json"
+            r = requests.get(stock_json_url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+            stock_list = r.json().get("stockList", [])
+            for item in stock_list:
+                if item.get("code") == symbol:
+                    org_id = item.get("orgId")
+                    break
+        except Exception as e:
+            logger.warning(f"AKShare 获取 orgId 失败 {ts_code}: {e}")
+
+        if not org_id:
+            # 回退：按常见规则构造 orgId
+            org_id = f"gs{exchange}{symbol}"
+
+        stock_item = f"{symbol},{org_id}"
+        start = f"{report_year}-01-01"
+        end = f"{report_year}-12-31"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+        base_api = "http://www.cninfo.com.cn/new/hisAnnouncement/query"
+
+        def fetch_pdf(category_key: str) -> dict:
+            cat = category_map.get(category_key)
+            if not cat:
+                return {}
+            payload = {
+                "pageNum": "1",
+                "pageSize": "30",
+                "column": column,
+                "tabName": "fulltext",
+                "plate": "",
+                "stock": stock_item,
+                "searchkey": "",
+                "secid": "",
+                "category": cat,
+                "trade": "",
+                "seDate": f"{start}~{end}",
+                "sortName": "",
+                "sortType": "",
+                "isHLtitle": "true",
+            }
+            try:
+                r = requests.post(base_api, data=payload, headers=headers, timeout=20)
+                data = r.json()
+                anns = data.get("announcements") or []
+                if not anns:
+                    return {}
+                # 选择中文版：跳过标题含 "英文版" / "英文" / "English" 的公告
+                selected_ann = None
+                for ann in anns:
+                    title = ann.get("announcementTitle", "")
+                    if any(k in title for k in ["英文版", "英文", "English"]):
+                        continue
+                    selected_ann = ann
+                    break
+                # 如果全是英文版，则取第一条
+                if selected_ann is None:
+                    selected_ann = anns[0]
+                ann = selected_ann
+                adjunct = ann.get("adjunctUrl", "")
+                if not adjunct:
+                    return {}
+                pdf_url = f"http://static.cninfo.com.cn/{adjunct}"
+                pdf_resp = requests.get(pdf_url, headers={"User-Agent": headers["User-Agent"]}, timeout=30)
+                if pdf_resp.status_code != 200:
+                    return {}
+                # 解析 PDF
+                text_parts = []
+                with pdfplumber.open(io.BytesIO(pdf_resp.content)) as pdf:
+                    for page in pdf.pages:
+                        txt = page.extract_text()
+                        if txt:
+                            text_parts.append(txt)
+                full_text = "\n".join(text_parts)
+                # 公告时间处理（毫秒时间戳）
+                ann_time = ann.get("announcementTime", "")
+                try:
+                    ann_date = datetime.fromtimestamp(int(ann_time) / 1000).strftime("%Y%m%d")
+                except Exception:
+                    ann_date = str(ann_time)[:10].replace("-", "")
+                return {
+                    "ann_date": ann_date,
+                    "title": ann.get("announcementTitle", ""),
+                    "source_url": pdf_url,
+                    "full_text": full_text,
+                    "sections": self._split_report_sections(full_text),
+                }
+            except Exception as e:
+                logger.warning(f"AKShare 年报抓取失败 {ts_code} {report_year} {category_key}: {e}")
+                return {}
+
+        # 优先获取年报，其次半年报、三季报、一季报
+        result = {"ts_code": ts_code, "report_year": report_year, "reports": {}}
+        for cat_key in ["annual", "semi-annual", "q3", "q1"]:
+            data = fetch_pdf(cat_key)
+            if data:
+                result["reports"][cat_key] = data
+        return result
+
+    @staticmethod
+    def _split_report_sections(text: str) -> dict:
+        """
+        按常见年报章节标题拆分文本。返回 {章节名: 内容}。
+        支持 "第X节 章节名"、"X、章节名"、单独一行 "章节名" 等多种形式。
+        """
+        if not text:
+            return {}
+
+        # 关键章节关键词，按年报常见顺序
+        key_sections = [
+            ("重要提示、目录和释义", ["重要提示", "目录和释义"]),
+            ("公司简介和主要财务指标", ["公司简介和主要财务指标", "公司基本情况", "主要会计数据和财务指标"]),
+            ("管理层讨论与分析", ["管理层讨论与分析", "经营情况讨论与分析", "管理层讨论与分析"]),
+            ("公司治理", ["公司治理", "股东大会情况"]),
+            ("环境和社会责任", ["环境和社会责任", "社会责任", "环境保护"]),
+            ("重要事项", ["重要事项", "重大事项"]),
+            ("股份变动及股东情况", ["股份变动及股东情况", "股东和实际控制人情况"]),
+            ("债券相关情况", ["债券相关情况", "公司债券"]),
+            ("财务报告", ["财务报告", "审计报告", "合并资产负债表"]),
+        ]
+
+        # 构造正则：匹配 "第N节 章节名" 或 "N、章节名" 或单独 "章节名"（作为一行开头）
+        patterns = []
+        for sec_name, aliases in key_sections:
+            alias_pattern = "|".join(re.escape(a) for a in aliases)
+            # 形式1: 第[一二三四五六七八九十\d]+节\s*(章节名)
+            # 形式2: [一二三四五六七八九十\d]+[、.．]\s*(章节名)
+            # 形式3: 行首单独出现章节名
+            pattern = (
+                f"(?:"
+                f"第[一二三四五六七八九十\\d]+[节章]\\s*({alias_pattern})"
+                f"|[一二三四五六七八九十\\d]+[、.．\\s]+({alias_pattern})"
+                f"|^[\\s]*({alias_pattern})[\\s]*$"
+                f")"
+            )
+            patterns.append((sec_name, re.compile(pattern, re.MULTILINE)))
+
+        # 找到每个章节的起始位置
+        positions = []
+        for sec_name, regex in patterns:
+            for m in regex.finditer(text):
+                positions.append((m.start(), sec_name))
+                break  # 每个章节只取第一次出现
+
+        if not positions:
+            return {"全文": text}
+
+        positions.sort()
+
+        # 提取章节内容
+        sections = {}
+        for i, (start, sec_name) in enumerate(positions):
+            end = positions[i + 1][0] if i + 1 < len(positions) else len(text)
+            sections[sec_name] = text[start:end].strip()
+
+        return sections
 
 
 # ---------------------------------------------------------------------------
@@ -541,8 +820,34 @@ class FallbackDataSource(DataSource):
         except Exception as e:
             raise RuntimeError(f"[{method}] 备用源 {self.fallback.name} 失败: {e}")
 
+    def _fetch_no_args(self, method: str) -> pd.DataFrame:
+        """用于不需要参数的方法，如 get_all_stocks。"""
+        try:
+            df = getattr(self.primary, method)()
+            if not df.empty:
+                logger.info(f"[{method}] 主源 {self.primary.name} 成功，返回 {len(df)} 行")
+                return df
+            logger.warning(f"[{method}] 主源 {self.primary.name} 返回空，尝试备用源")
+        except Exception as e:
+            logger.warning(f"[{method}] 主源 {self.primary.name} 失败: {e}")
+
+        if self.fallback is None:
+            raise RuntimeError(f"[{method}] 主源失败且未配置备用源")
+
+        try:
+            df = getattr(self.fallback, method)()
+            if not df.empty:
+                logger.info(f"[{method}] 备用源 {self.fallback.name} 成功，返回 {len(df)} 行")
+                return df
+            raise RuntimeError(f"[{method}] 备用源 {self.fallback.name} 也返回空")
+        except Exception as e:
+            raise RuntimeError(f"[{method}] 备用源 {self.fallback.name} 失败: {e}")
+
     def get_stock_basic(self, ts_code: str) -> pd.DataFrame:
         return self._fetch_no_dates("get_stock_basic", ts_code)
+
+    def get_all_stocks(self) -> pd.DataFrame:
+        return self._fetch_no_args("get_all_stocks")
 
     def get_daily_quotes(self, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         return self._fetch("get_daily_quotes", ts_code, start_date, end_date)
@@ -564,6 +869,31 @@ class FallbackDataSource(DataSource):
 
     def get_fina_audit(self, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         return self._fetch("get_fina_audit", ts_code, start_date, end_date)
+
+    def get_forecast(self, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
+        return self._fetch("get_forecast", ts_code, start_date, end_date)
+
+    def get_annual_report_text(self, ts_code: str, report_year: str) -> dict:
+        """年报全文抓取：主源失败后自动回退到备用源。"""
+        try:
+            result = self.primary.get_annual_report_text(ts_code, report_year)
+            if result and result.get("reports"):
+                logger.info(f"[get_annual_report_text] 主源 {self.primary.name} 成功")
+                return result
+        except Exception as e:
+            logger.warning(f"[get_annual_report_text] 主源 {self.primary.name} 失败: {e}")
+
+        if self.fallback is None:
+            raise RuntimeError("[get_annual_report_text] 主源失败且未配置备用源")
+
+        try:
+            result = self.fallback.get_annual_report_text(ts_code, report_year)
+            if result and result.get("reports"):
+                logger.info(f"[get_annual_report_text] 备用源 {self.fallback.name} 成功")
+                return result
+            raise RuntimeError("[get_annual_report_text] 备用源返回空")
+        except Exception as e:
+            raise RuntimeError(f"[get_annual_report_text] 备用源 {self.fallback.name} 失败: {e}")
 
 
 # ---------------------------------------------------------------------------

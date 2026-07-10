@@ -1,0 +1,4 @@
+Ignoring --allowedTools rule "**注意：你是在": Wildcard tool name "**注意：你是在" is not supported in allow rules. An allow pattern must name the scope it widens — globs are permitted only in the tool position after a literal mcp__<server>__ prefix. Deny and ask rules accept wildcards anywhere.
+Ignoring --allowedTools rule "会话中。正常执行即可。**": Wildcard tool name "会话中。正常执行即可。**" is not supported in allow rules. An allow pattern must name the scope it widens — globs are permitted only in the tool position after a literal mcp__<server>__ prefix. Deny and ask rules accept wildcards anywhere.
+Error: Input must be provided either through stdin or as a prompt argument when using --print
+[Wed Jul  8 10:00:03 AM +08 2026] exit=0

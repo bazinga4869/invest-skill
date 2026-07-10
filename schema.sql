@@ -312,3 +312,39 @@ CREATE TABLE IF NOT EXISTS macro_rates (
     updated_at TEXT NOT NULL,
     UNIQUE(date, rate_type)
 );
+
+-- 15. 年报/公告文本（按段落存储，便于 LLM 分段消费）
+CREATE TABLE IF NOT EXISTS annual_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_code TEXT NOT NULL,
+    report_year TEXT NOT NULL,           -- 报告年度 YYYY
+    report_type TEXT NOT NULL,           -- annual / semi-annual / q3 / notice
+    ann_date TEXT,                       -- 公告日期
+    title TEXT,                          -- 公告标题
+    section_name TEXT,                   -- 段落/章节名，如 "经营情况讨论与分析"
+    section_text TEXT,                   -- 文本内容
+    source_url TEXT,                     -- 原文链接
+    updated_at TEXT NOT NULL,
+    UNIQUE(ts_code, report_year, report_type, section_name)
+);
+CREATE INDEX IF NOT EXISTS idx_annual_reports_code_year ON annual_reports(ts_code, report_year);
+
+-- 16. 业绩预告
+CREATE TABLE IF NOT EXISTS forecast (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_code TEXT NOT NULL,
+    ann_date TEXT,                  -- 公告日期
+    end_date TEXT,                  -- 报告期
+    type TEXT,                      -- 预增/预减/首亏/续亏等
+    p_change_min REAL,              -- 净利润变动下限(%)
+    p_change_max REAL,              -- 净利润变动上限(%)
+    net_profit_min REAL,            -- 预告净利润下限(万元)
+    net_profit_max REAL,            -- 预告净利润上限(万元)
+    last_parent_net REAL,           -- 上年同期净利润(万元)
+    first_ann_date TEXT,            -- 首次公告日
+    summary TEXT,                   -- 业绩变动原因
+    change_reason TEXT,             -- 业绩变动原因详细
+    update_flag TEXT,               -- 更新标识
+    updated_at TEXT NOT NULL,
+    UNIQUE(ts_code, ann_date, end_date)
+);

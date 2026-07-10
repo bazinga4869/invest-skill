@@ -13,12 +13,12 @@
 │   ├── 10_meta/Wiki-Skill 联动规范.md
 │   └── ...
 └── invest-skill/         # 本工程：数据管道 + 分析 skill
-    ├── config.yaml       # 与 wiki 的显式契约
-    ├── schema.sql        # 自包含的数据库 schema
-    ├── company-analysis/
-    │   └── analyze_company.py
-    ├── data/             # SQLite 数据库（gitignore）
-    └── reports/          # 综合报告输出（gitignore）
+    ├── SKILL.md           # Skill 定义（分析协议、专家团架构）
+    ├── shared/            # 数据获取工具
+    ├── config.yaml        # 与 wiki 的显式契约
+    ├── schema.sql         # 自包含的数据库 schema
+    ├── data/              # SQLite 数据库（gitignore）
+    └── reports/           # 综合报告输出（gitignore）
 ```
 
 ## 快速开始
@@ -36,8 +36,8 @@ export TUSHARE_TOKEN="your_token"
 cp .env.example .env
 # 编辑 .env，填入真实 token
 
-# 运行分析
-python3 company-analysis/analyze_company.py 贵州茅台
+# 使用 Claude Code 分析（通过 SKILL.md 定义的协议）
+# 在项目目录下直接说"分析 贵州茅台"即可
 ```
 
 ### Token 配置说明
