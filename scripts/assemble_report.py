@@ -148,11 +148,11 @@ def build_report(ts_code: str, name: str, results: dict, data: dict) -> str:
     overview = f"""# {name}（{ts_code}）深度投资分析报告
 
 > **分析日期**：自动生成
-> **分析模式**：深度分析（7+1 专家团，独立子 Agent 物理隔离）
+> **分析模式**：深度分析（7+1 专家团，角色切换模式）
 > **数据基准日**：{market.get('trade_date', 'N/A')}（行情）| 最新财报：{latest_annual.get('year', 'N/A')}年报
 > **行业**：{stock_info.get('industry', 'N/A')}
 > **股票代码**：{ts_code}
-> **生成方式**：按 SKILL.md 协议 spawn 7 位独立专家 + 裁判长综合裁决
+> **生成方式**：按 SKILL.md 协议角色切换执行 7 域分析 + 裁判长综合裁决
 
 ---
 
