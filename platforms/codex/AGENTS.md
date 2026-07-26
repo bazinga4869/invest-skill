@@ -1,9 +1,40 @@
 # Codex 入口
 
-这是 Codex 的薄入口文件。完整 skill 说明见 [../SKILL.md](../SKILL.md)。
+Codex 的薄入口文件。完整 skill 说明见 [../SKILL.md](../SKILL.md)。
 
-## Codex 专有说明
+## 分析流程（独立 Agent 模式）
 
-Codex 按 SKILL.md 定义的角色切换协议执行。不依赖子进程 spawn（Codex 不支持嵌套 `codex exec`）。
+### 前置依赖
 
-执行前确保 Codex 已安装 llm-wiki skill（`~/.codex/skills/llm-wiki/`），以支持 wiki 知识预取。
+1. **llm-wiki skill** — 已安装于 `~/.codex/skills/llm-wiki/`
+2. **Tushare MCP** — 已配置 `codex mcp add tushareMcp`
+3. **Python 3.10+** + `pip install -r requirements.txt`
+4. **`config.yaml`** 中的 `analysis_date` 须与当前日期一致
+
+### 执行分析
+
+```bash
+# Step 1-4: 数据准备（主 Agent 执行）
+cd ~/invest-skill
+python3 shared/data_tools.py sync 603605.SH
+python3 shared/data_tools.py all 603605.SH > /tmp/invest_data_603605.SH.json
+python3 scripts/prepare_prompts.py 603605.SH
+
+# Step 5: 并行执行 7 位独立专家
+# 首选：用 Codex 原生 subagent 机制，每个子代理读一份
+#   /tmp/invest_prompt_603605.SH_<expert>.txt，结果写入对应的
+#   /tmp/invest_result_603605.SH_<expert>.md（详见 ../SKILL.md 第五步 spawn 模板）
+# headless/cron 场景才使用 shell 脚本：
+bash scripts/run_experts.sh 603605.SH --agent codex
+
+# Step 6-8: 收齐结果 + 裁判裁决 + 报告生成
+python3 scripts/collect_results.py 603605.SH --json
+python3 scripts/assemble_report.py 603605.SH --name <公司名>
+# 主 Agent 撰写裁判长裁决（填写 assemble_report.py 生成的草稿占位符）
+```
+
+### Codex 专属注意事项
+
+- `codex exec` 通过 stdin 接收 prompt：`cat prompt.txt | codex exec -`
+- 并行执行时每个 `codex exec` 是独立进程，不会出现嵌套 spawn 问题
+- 默认并发数 3，可在 `run_experts.sh` 中通过 `RUN_EXPERTS_CONCURRENCY` 环境变量调整

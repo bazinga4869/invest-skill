@@ -1,7 +1,8 @@
 project:
   name: invest-skill
   version: 0.1.0
-  analysis_date: '2026-07-09'
+  # 留空 = 取系统当天（日常/cron 必须如此）；仅历史回测时钉日期，如 '2026-07-20'
+  analysis_date:
 paths:
   data_dir: ./data
   reports_dir: ./reports

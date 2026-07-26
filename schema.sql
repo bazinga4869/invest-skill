@@ -124,6 +124,7 @@ CREATE TABLE IF NOT EXISTS income (
     total_profit REAL,
     n_income REAL,                       -- 净利润
     n_income_attr_p REAL,                -- 归母净利润
+    deducted_profit REAL,               -- 扣非净利润
     updated_at TEXT NOT NULL,
     UNIQUE(ts_code, end_date, report_type),
     FOREIGN KEY (ts_code) REFERENCES stocks(ts_code)

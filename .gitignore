@@ -2,6 +2,14 @@
 data/
 reports/
 
+# Secrets & local state
+.env
+.venv/
+.kimi-code/
+config/
+logs/
+company-analysis/
+
 # Python
 __pycache__/
 *.pyc

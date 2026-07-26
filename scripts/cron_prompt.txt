@@ -1,6 +1,8 @@
 ## 任务：自动化每日股票分析（cron 触发）
 
 你被 cron 定时拉起，需要独立完成一次完整的 7+1 专家团深度分析。
+执行标准是 invest-skill 的标准管线（prepare_prompts → run_experts → 裁判长 → assemble_report），
+禁止用「单会话内扮演全部专家」的方式替代——那会破坏专家之间的认知隔离，产出无效报告。
 
 ### Step 0：选股
 
@@ -19,54 +21,116 @@
 3. 从 valid[next_index] 开始，找到第一只满足条件的股票：
    - 该股票的 ts_code 不在 `last_analyzed` 中，或距今 > 5 天
    - 如果当前 next_index 指向的股票 5 天内已分析过，next_index += 1 继续找
-   - 找到后记录 code = 该股票的 ts_code
+   - 找到后记录 code = 该股票的 ts_code、name = 公司名
 
 4. 如果 next_index 超出 valid 长度，从 0 循环
 
-### Step 1：数据管道
+### Step 0.5：断点检查（⛔ 先做这步，避免重复劳动）
+
+上一次运行可能在专家分析完成后中断。按顺序检查：
+
+1. `/tmp/invest_data_<code>.json` 存在且 `market.trade_date` 是最近 5 天内，且
+   `python3 scripts/collect_results.py <code> --check` 输出 7/7 通过
+   → 说明数据与 7 份专家结果都已就绪，**直接跳到 Step 5**（裁判长裁决）
+2. 否则按 Step 1 正常开始
+
+### Step 1：数据同步
+
 ```bash
-source .venv/bin/activate
-python3 company-analysis/analyze_company.py <code>
+python3 shared/data_tools.py sync <code>
 ```
-这会生成 reports/invest_tool/<code>.md（含完整数据，LLM区为占位符）
 
-### Step 2：读取报告
-读取刚生成的 reports/invest_tool/<code>.md，熟悉所有数据
+同步完成后验证数据新鲜度（防止静默用到陈旧行情）：
+`python3 shared/data_tools.py market <code>` 的 `trade_date` 必须在最近 5 天内，
+否则视为数据不可用，按 Step 2 的失败路径退出。
 
-### Step 3：专家团评估
-逐一读取以下 wiki 文件，按各专家的检查清单对报告中的数据进行判定：
-- ../invest-wiki/04_stock-analysis-expert/experts/01-财务排雷官.md
-- ../invest-wiki/04_stock-analysis-expert/experts/02-价值估值师.md
-- ../invest-wiki/04_stock-analysis-expert/experts/03-成长质量师.md
-- ../invest-wiki/04_stock-analysis-expert/experts/04-护城河分析师.md
-- ../invest-wiki/04_stock-analysis-expert/experts/05-认知风控官.md
-- ../invest-wiki/04_stock-analysis-expert/experts/06-宏观周期师.md
-- ../invest-wiki/04_stock-analysis-expert/experts/07-管理层审计师.md
-- ../invest-wiki/04_stock-analysis-expert/adjudicator/裁判长-多框架裁判规则.md
+### Step 2：生成专家 prompt（⛔ 硬失败点）
 
-### Step 4：写评估
-用 Edit 工具，将报告中"## 六、LLM 专家评估区"的占位内容替换为完整的 6.1~6.8 评估。
+```bash
+python3 scripts/prepare_prompts.py <code>
+```
 
-格式要求：
-- 每位专家一节，表格呈现检查结果
-- 逐项判定 PASS/WARN/VETO，引用报告中的具体数据
-- 无法从报告中判断的项标记"🔵 待查"
-- 0-100 评分，裁决 PASS/WARN/VETO
-- 裁判长 6.8 节做加权综合（权重见 config.yaml）+ VETO检查 + 最终结论
+- 该步骤会拉取全部财务数据 + 最近 5 年年报文本（首次需从巨潮下载，耗时几分钟，正常）
+- **exit != 0 → 本次分析失败**：记录活动日志后退出：
+  `source scripts/activity_log.sh && log_activity prompt <code> <name> failure "prepare_prompts失败"`
+- ⛔ 禁止在数据/年报缺失时继续；⛔ 禁止写「数据 N/A」的报告；⛔ 禁止更新 auto_state.json
 
-### Step 5：更新状态
+### Step 3：独立专家分析（⛔ 硬失败点）
+
+```bash
+bash scripts/run_experts.sh <code> --no-prepare
+```
+
+- 这会并行启动 7 个独立 agent 进程，全程约 30-45 分钟，正常
+- 失败时幂等重试一次：`bash scripts/run_experts.sh <code> --no-prepare --retry`
+- 重试仍失败 → 记录 failure 并退出（同样禁止写报告、禁止更新状态）
+
+### Step 4：校验
+
+```bash
+python3 scripts/collect_results.py <code> --check
+```
+
+必须 7/7 通过，否则回到 Step 3 的 --retry 路径（最多一次）。
+
+### Step 5：裁判长综合裁决（你的核心认知工作）
+
+按 SKILL.md 第六步执行：
+1. 读 wiki 规则（路径基于 skill 目录的上一级，绝对路径示例：
+   `/home/bazinga/invest-wiki/04_stock-analysis-expert/adjudicator/裁判长-多框架裁判规则.md`，
+   以及同目录下的 `index.md`；不同机器上把 `/home/bazinga` 换成实际路径）；
+   案例库（案例库-裁判先例.md）如存在则参照，不存在则标注「无先例可参照」
+2. 通读全部 7 份 `/tmp/invest_result_<code>_*.md`（不是只看 frontmatter 分数）
+3. 按 wiki 规则裁决：先查一票否决 → 处理框架冲突 → 给出评级 + 仓位 + 理由 + 分歧 + 观察指标
+
+### Step 6：生成报告
+
+```bash
+python3 scripts/assemble_report.py <code> --name <公司名>
+```
+
+- 将 Step 5 的裁决书写入草稿（裁决 yaml、裁决理由、一行总评、知识索引）
+- 然后定稿：`python3 scripts/assemble_report.py <code> --name <公司名> --finalize`
+
+### Step 7：结构化自评审
+
+按 SKILL.md 第八步执行（四维度扣分制，总分 90）。
+≥ 72 分准出，把评审结论附加到报告末尾；< 72 分修正后重评。
+
+### Step 8：更新状态（仅限成功路径）
+
 更新 data/auto_state.json：
 - `last_analyzed[code]` = 当天日期（ISO 格式）
-- `next_index` = 当前 index + 1（如果循环了则正确取模）
-- `history` 数组追加本次记录
+- `next_index` = 当前 index + 1（循环则取模）
+- `history` 数组追加：`{ts_code, name, date, rating, score}`
 
-### Step 6：更新修订历史
-报告底部的修订历史改为当天日期 + "cron 自动分析"，管道标注 invest_tool（Tushare）。
+并记录活动日志（供 21:00 Hermes 推送与监控消费）：
+`source scripts/activity_log.sh && log_activity report <code> <name> success "<rating> <score>分"`
+
+### Step 9：环境清理
+
+按 SKILL.md 第九步清理 `/tmp/invest_*<code>*` 中间文件和残留草稿。
+
+### Step 10：完成标记（⛔ 强制）
+
+全部步骤成功后，最后一行必须输出（cron_trigger.sh 以此判定成功，缺失视为失败）：
+
+```
+CRON_DONE <code> <rating> <score>
+```
+
+失败路径则输出：
+
+```
+CRON_FAIL <code> <原因一句话>
+```
 
 ### 关键约束
-- 不要修改报告的数据部分（一~五章 + 复核报告）
-- 评分只能基于已有数据
-- 不要跳过任何专家
-- 认知风控官触发 WARN≥3 → 综合分打 8.5 折
-- Graham Number / 股价 < 0.5 → 强制 HOLD/SELL
-- **注意：你是在 cron 环境下被拉起的，不是嵌套在另一个 Claude 会话中。正常执行即可。**
+
+- ⛔ 任何硬失败点失败 → 记录 failure 后退出，**不产出报告、不更新 auto_state.json**
+  （失败的股票下次 cron 会被重新选中，好过留下一份假报告占位 5 天）
+- ⛔ 禁止使用 company-analysis/analyze_company.py 的模板报告流程（已废弃）
+- ⛔ 禁止在单会话内扮演 7 位专家——专家分析只能由 run_experts.sh 的独立进程完成
+- 评分只能基于 data_tools 实际取到的数据和年报文本，禁止编造
+- ⛔ 禁止中途停止：从 Step 0 到 Step 10 必须一口气做完。token 预算充足，
+  禁止以「进入下一步」「接下来将…」等过渡语作为会话的最后一条消息

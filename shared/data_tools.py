@@ -62,7 +62,10 @@ def load_config() -> dict:
 
 
 CONFIG = load_config()
-TODAY = datetime.strptime(CONFIG["project"]["analysis_date"], "%Y-%m-%d")
+# analysis_date 为可选的日期钉（历史回测用）；日常/cron 场景必须取系统当天，
+# 否则 sync 的数据截止日期会永远停留在配置里那一天（实测 DB 行情因此停滞在 07-20）
+_analysis_date = CONFIG["project"].get("analysis_date")
+TODAY = datetime.strptime(_analysis_date, "%Y-%m-%d") if _analysis_date else datetime.now()
 
 
 def get_db() -> sqlite3.Connection:
@@ -79,16 +82,16 @@ def _f(v):
 def _yi(v):
     """元 → 亿"""
     fv = _f(v)
-    return round(fv / 1e8, 2) if fv else None
+    return None if fv is None else round(fv / 1e8, 2)
 
 def _yi_w(v):
     """万元 → 亿"""
     fv = _f(v)
-    return round(fv / 10000, 2) if fv else None
+    return None if fv is None else round(fv / 10000, 2)
 
 def _pct(a, b):
     fa, fb = _f(a), _f(b)
-    return round(fa / fb * 100, 2) if fa and fb else None
+    return None if fa is None or fb is None or fb == 0 else round(fa / fb * 100, 2)
 
 def _compute_cagr(start, end, years):
     if not start or not end or start <= 0 or end <= 0 or years <= 0:
@@ -135,6 +138,8 @@ def cmd_sync(ts_code: str, force: bool = False) -> dict:
         _write_fin(conn, df_bal, "balance", ts_code)
         _write_fin(conn, df_cf, "cashflow", ts_code)
         _write_fin(conn, df_fina, "fina_indicators", ts_code)
+        df_audit = ds.get_fina_audit(ts_code, start_10y, today_str)
+        _write_fin(conn, df_audit, "fina_audit", ts_code)
         result["synced"].append("financials")
     else:
         result["skipped"].append("financials")
@@ -262,7 +267,7 @@ def cmd_market(ts_code: str) -> dict:
 
 def cmd_annual(ts_code: str) -> dict:
     conn = get_db()
-    df = pd.read_sql("SELECT end_date, total_revenue, n_income_attr_p, total_cogs, rd_exp, sell_exp, operate_profit FROM income WHERE ts_code=? AND end_date LIKE '%1231' ORDER BY end_date", conn, params=(ts_code,))
+    df = pd.read_sql("SELECT end_date, total_revenue, n_income_attr_p, total_cogs, rd_exp, sell_exp, operate_profit, non_oper_income FROM income WHERE ts_code=? AND end_date LIKE '%1231' ORDER BY end_date", conn, params=(ts_code,))
     conn.close()
     years_data = []
     for _, row in df.iterrows():
@@ -276,6 +281,8 @@ def cmd_annual(ts_code: str) -> dict:
             "rd_expense_yi": _yi(row.get("rd_exp")),
             "sell_expense_yi": _yi(row.get("sell_exp")),
             "operate_profit_yi": _yi(row.get("operate_profit")),
+            "non_oper_income_yi": _yi(row.get("non_oper_income")),
+            "non_recurring_pct": _pct(row.get("non_oper_income"), row.get("operate_profit")),
         })
     rev_vals = [d["revenue_yi"] for d in years_data if d["revenue_yi"]]
     profit_vals = [d["net_profit_yi"] for d in years_data if d["net_profit_yi"]]
@@ -316,23 +323,31 @@ def cmd_quarterly(ts_code: str) -> dict:
 
 def cmd_balance(ts_code: str) -> dict:
     conn = get_db()
-    df = pd.read_sql("SELECT end_date, total_assets, total_liab, total_hldr_eqy_exc_min_int, money_cap, st_borr, lt_borr, bonds_payable, goodwill, accounts_receiv, inventories FROM balance WHERE ts_code=? AND end_date LIKE '%1231' ORDER BY end_date DESC LIMIT 1", conn, params=(ts_code,))
+    df = pd.read_sql("SELECT end_date, total_assets, total_liab, total_hldr_eqy_exc_min_int, money_cap, st_borr, lt_borr, bonds_payable, goodwill, accounts_receiv, inventories FROM balance WHERE ts_code=? AND end_date LIKE '%1231' ORDER BY end_date DESC LIMIT 3", conn, params=(ts_code,))
     conn.close()
     if df.empty: return {"error": "无资产负债表数据"}
-    r = df.iloc[0]
-    equity = _f(r.get("total_hldr_eqy_exc_min_int", 0))
-    goodwill = _f(r.get("goodwill", 0))
-    money = _f(r.get("money_cap", 0))
-    debt = (_f(r.get("st_borr", 0) or 0) + _f(r.get("lt_borr", 0) or 0) + _f(r.get("bonds_payable", 0) or 0))
+    history = []
+    for _, row in df.iterrows():
+        equity = _f(row.get("total_hldr_eqy_exc_min_int", 0))
+        goodwill = _f(row.get("goodwill") or 0)
+        money = _f(row.get("money_cap", 0))
+        debt = (_f(row.get("st_borr", 0) or 0) + _f(row.get("lt_borr", 0) or 0) + _f(row.get("bonds_payable", 0) or 0))
+        yr = str(row["end_date"])[:4]
+        history.append({
+            "year": yr,
+            "total_assets_yi": _yi(row.get("total_assets")),
+            "equity_yi": _yi(equity), "cash_yi": _yi(money),
+            "interest_debt_yi": _yi(debt), "debt_gt_cash": (debt or 0) > (money or 0),
+            "goodwill_yi": _yi(goodwill), "goodwill_ratio_pct": _pct(goodwill, equity),
+            "accounts_receiv_yi": _yi(row.get("accounts_receiv")),
+            "inventories_yi": _yi(row.get("inventories")),
+            "asset_liability_ratio_pct": _pct(row.get("total_liab"), row.get("total_assets")),
+        })
+    # history 按 end_date DESC 排序，history[0] 为最新年报，展开为顶层字段（向后兼容）
     return {
-        "ts_code": ts_code, "end_date": str(r["end_date"]),
-        "total_assets_yi": _yi(r.get("total_assets")),
-        "equity_yi": _yi(equity), "cash_yi": _yi(money),
-        "interest_debt_yi": _yi(debt), "debt_gt_cash": (debt or 0) > (money or 0),
-        "goodwill_yi": _yi(goodwill), "goodwill_ratio_pct": _pct(goodwill, equity),
-        "accounts_receiv_yi": _yi(r.get("accounts_receiv")),
-        "inventories_yi": _yi(r.get("inventories")),
-        "asset_liability_ratio_pct": _pct(r.get("total_liab"), r.get("total_assets")),
+        "ts_code": ts_code, "end_date": str(df.iloc[0]["end_date"]),
+        **history[0],
+        "balance_history": history,
     }
 
 
@@ -350,6 +365,29 @@ def cmd_indicators(ts_code: str) -> dict:
             "current_ratio": _f(row.get("current_ratio")),
         })
     return {"ts_code": ts_code, "indicators": indicators, "count": len(indicators)}
+
+
+def cmd_fina_audit(ts_code: str) -> dict:
+    """获取最新年报审计意见。"""
+    conn = get_db()
+    df = pd.read_sql(
+        "SELECT ann_date, end_date, audit_result, audit_sign, audit_fees, audit_agency FROM fina_audit WHERE ts_code=? ORDER BY end_date DESC LIMIT 3",
+        conn, params=(ts_code,))
+    conn.close()
+    if df.empty:
+        return {"ts_code": ts_code, "has_audit": False, "message": "无审计意见数据"}
+    audits = []
+    for _, r in df.iterrows():
+        audits.append({
+            "ann_date": str(r["ann_date"]),
+            "end_date": str(r["end_date"]),
+            "audit_result": r.get("audit_result"),
+            "audit_sign": r.get("audit_sign"),
+            # audit_fees 单位为元（Tushare fina_audit），用元→亿换算
+            "audit_fees_yi": _yi(r.get("audit_fees")),
+            "audit_agency": r.get("audit_agency"),
+        })
+    return {"ts_code": ts_code, "has_audit": True, "latest": audits[0], "history": audits}
 
 
 def cmd_forecast(ts_code: str) -> dict:
@@ -587,6 +625,7 @@ def cmd_all(ts_code: str) -> dict:
     return {"stock_info": cmd_stock_info(ts_code), "market": cmd_market(ts_code),
             "annual": cmd_annual(ts_code), "quarterly": cmd_quarterly(ts_code),
             "balance": cmd_balance(ts_code), "indicators": cmd_indicators(ts_code),
+            "audit": cmd_fina_audit(ts_code),
             "industry": cmd_industry(ts_code), "forecast": cmd_forecast(ts_code)}
 
 

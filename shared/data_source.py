@@ -9,7 +9,7 @@
 3. 返回的 DataFrame 列名尽量与 Tushare 保持一致，便于下游统一处理
 """
 
-import os
+import os, sys, json, subprocess
 import time
 import logging
 import re
@@ -767,14 +767,123 @@ class AKShareDataSource(DataSource):
 # 自动回退数据源
 # ---------------------------------------------------------------------------
 
+
+class CacheDataSource(DataSource):
+    """
+    本地缓存 + 浏览器下载的年报数据源（第三源）。
+    1. 检查 ~/企业年报/{code6}/{year}_{code6}_annual_sections.json
+    2. 有则直接返回
+    3. 无则调用 cninfo-annual skill 的 fetch.py 下载
+    """
+    name = "cache"
+
+    SKILL_DIR = os.path.expanduser("~/.codex/skills/cninfo-annual/scripts")
+    ANNUAL_DIR = os.path.expanduser("~/企业年报")
+    PLAYWRIGHT_PATH = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/tmp/pw-browsers")
+
+    def __init__(self):
+        self.skill_script = os.path.join(self.SKILL_DIR, "fetch.py")
+
+    @staticmethod
+    def code6(ts_code: str) -> str:
+        c = ts_code.upper().strip()
+        if c.endswith(".SH") or c.endswith(".SZ") or c.endswith(".BJ"):
+            return c[:6]
+        if len(c) == 6 and c.isdigit():
+            return c
+        raise ValueError(f"无法识别的股票代码: {ts_code}")
+
+    def get_annual_report_text(self, ts_code: str, report_year: str) -> dict:
+        code6 = self.code6(ts_code)
+        target = os.path.join(self.ANNUAL_DIR, code6)
+        json_path = os.path.join(target, f"{report_year}_{code6}_annual_sections.json")
+        pdf_path = os.path.join(target, f"{report_year}_{code6}_annual_report.pdf")
+
+        if not os.path.exists(json_path):
+            self._download(code6, report_year)
+            if not os.path.exists(json_path):
+                raise RuntimeError(f"年报下载后仍不可得: {ts_code} {report_year}")
+
+        with open(json_path, "r", encoding="utf-8") as f:
+            sec_data = json.load(f)
+
+        full_text = ""
+        if os.path.exists(pdf_path):
+            try:
+                import pdfplumber
+                with pdfplumber.open(pdf_path) as pdf:
+                    full_text = "\n".join(p.extract_text() or "" for p in pdf.pages)
+            except Exception:
+                pass
+
+        key_map = {
+            "management_discussion": "经营情况讨论与分析",
+            "core_competitiveness": "核心竞争力分析",
+            "future_risks": "可能面对的风险",
+            "corporate_governance": "公司治理",
+            "shareholder_info": "股份变动及股东情况",
+        }
+        sections = {}
+        for eng, chn in key_map.items():
+            txt = sec_data.get(eng, "")
+            if txt:
+                sections[chn] = txt
+        if not sections and sec_data.get("full_text_len", 0) > 0:
+            sections["全文"] = f"({sec_data['full_text_len']} chars, 见 sections JSON)"
+
+        return {
+            "ts_code": ts_code,
+            "report_year": report_year,
+            "reports": {
+                "annual": {
+                    "ann_date": f"{report_year}0422",
+                    "title": f"{report_year}年年度报告",
+                    "source_url": f"file://{pdf_path}" if os.path.exists(pdf_path) else "",
+                    "full_text": full_text,
+                    "sections": sections,
+                }
+            },
+        }
+
+    def _download(self, code6: str, report_year: str):
+        if not os.path.exists(self.skill_script):
+            logger.warning(f"cninfo-annual skill 脚本未找到: {self.skill_script}")
+            return
+        env = os.environ.copy()
+        env["PLAYWRIGHT_BROWSERS_PATH"] = self.PLAYWRIGHT_PATH
+        try:
+            r = subprocess.run(
+                [sys.executable, self.skill_script, code6, "--years", report_year, "--force"],
+                capture_output=True, text=True, timeout=120, env=env,
+            )
+            if r.returncode != 0:
+                logger.warning(f"cninfo-annual 下载失败: {r.stderr[:500]}")
+        except Exception as e:
+            logger.warning(f"cninfo-annual 执行异常: {e}")
+
+    def get_stock_basic(self, ts_code): raise NotImplementedError
+    def get_all_stocks(self): raise NotImplementedError
+    def get_daily_quotes(self, ts_code, start, end): raise NotImplementedError
+    def get_daily_basic(self, ts_code, start, end): raise NotImplementedError
+    def get_income(self, ts_code, start, end): raise NotImplementedError
+    def get_balance(self, ts_code, start, end): raise NotImplementedError
+    def get_cashflow(self, ts_code, start, end): raise NotImplementedError
+    def get_fina_indicator(self, ts_code, start, end): raise NotImplementedError
+    def get_fina_audit(self, ts_code, start, end): raise NotImplementedError
+    def get_forecast(self, ts_code, start, end): raise NotImplementedError
+
+
+
 class FallbackDataSource(DataSource):
     """先尝试主源，失败或返回空时自动切换到备用源。"""
 
     name = "fallback"
 
-    def __init__(self, primary: DataSource, fallback: Optional[DataSource] = None):
+    def __init__(self, primary: DataSource, fallback: Optional[DataSource] = None,
+                 cache: Optional[DataSource] = None):
         self.primary = primary
         self.fallback = fallback
+        self.cache = cache
 
     def _fetch(self, method: str, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         try:
@@ -874,7 +983,7 @@ class FallbackDataSource(DataSource):
         return self._fetch("get_forecast", ts_code, start_date, end_date)
 
     def get_annual_report_text(self, ts_code: str, report_year: str) -> dict:
-        """年报全文抓取：主源失败后自动回退到备用源。"""
+        """年报全文抓取：主源→备用源→缓存源（三源依次回退）。"""
         try:
             result = self.primary.get_annual_report_text(ts_code, report_year)
             if result and result.get("reports"):
@@ -883,17 +992,25 @@ class FallbackDataSource(DataSource):
         except Exception as e:
             logger.warning(f"[get_annual_report_text] 主源 {self.primary.name} 失败: {e}")
 
-        if self.fallback is None:
-            raise RuntimeError("[get_annual_report_text] 主源失败且未配置备用源")
+        if self.fallback is not None:
+            try:
+                result = self.fallback.get_annual_report_text(ts_code, report_year)
+                if result and result.get("reports"):
+                    logger.info(f"[get_annual_report_text] 备用源 {self.fallback.name} 成功")
+                    return result
+            except Exception as e:
+                logger.warning(f"[get_annual_report_text] 备用源 {self.fallback.name} 失败: {e}")
 
-        try:
-            result = self.fallback.get_annual_report_text(ts_code, report_year)
-            if result and result.get("reports"):
-                logger.info(f"[get_annual_report_text] 备用源 {self.fallback.name} 成功")
-                return result
-            raise RuntimeError("[get_annual_report_text] 备用源返回空")
-        except Exception as e:
-            raise RuntimeError(f"[get_annual_report_text] 备用源 {self.fallback.name} 失败: {e}")
+        if self.cache is not None:
+            try:
+                result = self.cache.get_annual_report_text(ts_code, report_year)
+                if result and result.get("reports"):
+                    logger.info(f"[get_annual_report_text] 缓存源 {self.cache.name} 成功")
+                    return result
+            except Exception as e:
+                logger.warning(f"[get_annual_report_text] 缓存源 {self.cache.name} 失败: {e}")
+
+        raise RuntimeError(f"[get_annual_report_text] 所有数据源均失败: {ts_code} {report_year}")
 
 
 # ---------------------------------------------------------------------------
@@ -929,5 +1046,13 @@ def create_data_source(config: dict) -> DataSource:
         fallback = AKShareDataSource()
 
     if fallback:
-        return FallbackDataSource(primary=primary, fallback=fallback)
+        cache = None
+        cache_script = os.path.expanduser("~/.codex/skills/cninfo-annual/scripts/fetch.py")
+        if os.path.exists(cache_script):
+            try:
+                cache = CacheDataSource()
+                logger.info("[create_data_source] CacheDataSource 初始化成功")
+            except Exception as e:
+                logger.warning(f"[create_data_source] CacheDataSource 初始化失败: {e}")
+        return FallbackDataSource(primary=primary, fallback=fallback, cache=cache)
     return primary

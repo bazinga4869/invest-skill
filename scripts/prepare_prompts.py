@@ -1,24 +1,36 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-生成 7 位专家 + 3 位评审员的 prompt 文件。
+生成 7 位专家的 prompt 文件。
 
 用法：
     python3 scripts/prepare_prompts.py 603605.SH
 
 输出：
     /tmp/invest_prompt_<code>_<expert_id>.txt      # 7 位专家
-    /tmp/invest_review_prompt_<code>_<N>.txt       # 3 位评审员
     /tmp/invest_data_<code>.json                   # 原始数据
+    /tmp/invest_annual_<code>.txt                  # 年报全量章节（调试/裁判长查阅用）
+
+硬失败策略（与 SKILL.md「异常处理」一致）：
+    - 数据获取失败          → 退出码 2
+    - 年报文本抓取/解析失败 → 退出码 2（反叙事验证是 7 位专家的共同责任，不可跳过继续）
+
+退出码：0 成功；2 数据或年报不可用。
 """
 import argparse
+import datetime as dt
+import json
 import re
+import sqlite3
 import subprocess
+import sys
 from pathlib import Path
+
 import yaml
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 WIKI_ROOT = SKILL_ROOT.parent / "invest-wiki" / "04_stock-analysis-expert"
+DB_PATH = SKILL_ROOT / "data" / "invest_skill.db"
 
 EXPERTS = [
     ("financial-auditor", "01-财务排雷官"),
@@ -30,56 +42,54 @@ EXPERTS = [
     ("management-auditor", "07-管理层审计师"),
 ]
 
+# --- 年报章节按专家裁剪 -------------------------------------------------------
+# 反叙事交叉验证是每位专家的共同责任，核心章节全员必给；
+# 其余章节按专家关注域裁剪，控制 prompt 体积（匹配方式为子串包含）。
+_CORE_SECTIONS = ["管理层讨论与分析", "经营情况讨论与分析", "公司未来发展的展望", "可能面对的风险"]
+
+EXPERT_SECTIONS = {
+    "financial-auditor": _CORE_SECTIONS + ["重要事项", "募集资金使用", "财务报告"],
+    "value-valuator": _CORE_SECTIONS + ["重要事项"],
+    "growth-assessor": _CORE_SECTIONS + ["核心竞争力分析"],
+    "moat-analyst": _CORE_SECTIONS + ["核心竞争力分析"],
+    "cognitive-controller": _CORE_SECTIONS + ["重要事项", "公司治理"],
+    "macro-cyclist": ["管理层讨论与分析", "经营情况讨论与分析"],
+    "management-auditor": _CORE_SECTIONS + ["公司治理", "股份变动及股东情况", "重要事项"],
+}
+
+SECTION_CHAR_CAP = 12000          # 单章节字符上限
+ANNUAL_BUDGET_CHARS = 240_000     # 单专家年报文本总预算（超出时丢弃最早年份）
+
 
 def fetch_data(ts_code: str) -> str:
-    """调用 data_tools.py all 获取全部财务与行情数据（不含年报文本，保持快速）。"""
+    """调用 data_tools.py all 获取全部财务与行情数据。"""
+    print(f"[prepare] 获取数据 {ts_code} ...", flush=True)
     result = subprocess.run(
         ["python3", str(SKILL_ROOT / "shared" / "data_tools.py"), "all", ts_code],
-        capture_output=True, text=True, timeout=120, cwd=str(SKILL_ROOT)
+        capture_output=True, text=True, timeout=300, cwd=str(SKILL_ROOT)
     )
     if result.returncode != 0:
-        raise RuntimeError(f"数据获取失败: {result.stderr}")
+        raise RuntimeError(f"数据获取失败: {result.stderr[-500:]}")
     return result.stdout
 
 
-def fetch_annual_reports(ts_code: str, years: int = 5) -> str:
+def fetch_annual_rows(ts_code: str, years: int = 5) -> list:
+    """抓取最近 N 年年报全文（写入 DB），返回结构化章节行。
+
+    硬失败：子进程失败或 DB 无记录时抛 RuntimeError。
     """
-    调用 data_tools.py annual-report 抓取并解析最近 N 年年报全文，
-    然后从数据库读取关键章节，整理为文本块。
-    """
-    subprocess.run(
+    proc = subprocess.run(
         ["python3", str(SKILL_ROOT / "shared" / "data_tools.py"), "annual-report", ts_code],
         capture_output=True, text=True, timeout=600, cwd=str(SKILL_ROOT)
     )
+    if proc.returncode != 0:
+        raise RuntimeError(f"年报抓取失败(exit={proc.returncode}): {proc.stderr[-500:]}")
 
-    import sqlite3
-    db_path = SKILL_ROOT / "data" / "invest_skill.db"
-    if not db_path.exists():
-        return ""
+    if not DB_PATH.exists():
+        raise RuntimeError(f"数据库不存在: {DB_PATH}")
 
-    conn = sqlite3.connect(str(db_path))
-    cur_year = 2099  # 占位
-    try:
-        import datetime as dt
-        cur_year = dt.datetime.now().year
-    except Exception:
-        pass
-    start_year = cur_year - years + 1
-
-    # 优先读取关键章节；管理层审计师需要公司治理等，因此把公司治理、股份变动也纳入
-    priority_sections = [
-        "管理层讨论与分析",
-        "经营情况讨论与分析",
-        "核心竞争力分析",
-        "公司未来发展的展望",
-        "可能面对的风险",
-        "重要事项",
-        "股份变动及股东情况",
-        "公司治理",
-        "募集资金使用",
-        "全文",
-    ]
-
+    start_year = dt.datetime.now().year - years + 1
+    conn = sqlite3.connect(str(DB_PATH))
     rows = conn.execute(
         """SELECT report_year, report_type, section_name, section_text, ann_date, title
            FROM annual_reports
@@ -90,18 +100,49 @@ def fetch_annual_reports(ts_code: str, years: int = 5) -> str:
     conn.close()
 
     if not rows:
-        return ""
+        raise RuntimeError(
+            f"年报文本不可得（{ts_code} 最近 {years} 年无记录）。"
+            "按 SKILL.md 异常处理：硬失败，禁止跳过反叙事步骤继续分析。"
+        )
+    return rows
 
-    # 按年度-报告类型-章节组织
-    parts = ["\n## 公司年报文本（最近 3-5 年关键章节）\n"]
-    current_year_rt = None
+
+def dump_annual_full(rows: list) -> str:
+    """全量章节文本（落盘供调试/裁判长查阅），不受专家预算限制。"""
+    parts = []
     for year, rt, sec, text, ann_date, title in rows:
-        key = (year, rt)
-        if key != current_year_rt:
-            parts.append(f"\n### {year}年 {rt}（公告日：{ann_date}，标题：{title}）\n")
-            current_year_rt = key
-        parts.append(f"\n#### {sec}\n{text[:12000]}\n")  # 单章节上限，避免 prompt 过长
+        parts.append(f"\n### {year}年 {rt}（公告日：{ann_date}，标题：{title}）\n"
+                     f"#### {sec}\n{(text or '')[:SECTION_CHAR_CAP]}\n")
+    return "\n".join(parts)
 
+
+def format_annual_text(rows: list, expert_id: str, budget: int = ANNUAL_BUDGET_CHARS) -> str:
+    """按专家关注域筛选章节并格式化，总量受 budget 约束。
+
+    rows 已按年份降序排列；预算耗尽时丢弃最早年份并显式标注。
+    """
+    wanted = EXPERT_SECTIONS.get(expert_id, _CORE_SECTIONS)
+    selected = [r for r in rows if any(w in (r[2] or "") for w in wanted)]
+
+    parts = ["\n## 公司年报文本（最近 3-5 年关键章节，按你的专业域筛选）\n"]
+    total = 0
+    truncated = False
+    current_key = None
+    for year, rt, sec, text, ann_date, title in selected:
+        block = (text or "")[:SECTION_CHAR_CAP]
+        if total + len(block) > budget:
+            truncated = True
+            break
+        key = (year, rt)
+        if key != current_key:
+            parts.append(f"\n### {year}年 {rt}（公告日：{ann_date}，标题：{title}）\n")
+            current_key = key
+        parts.append(f"\n#### {sec}\n{block}\n")
+        total += len(block)
+    if truncated:
+        parts.append("\n> 注：受篇幅预算限制，更早年份的章节未纳入；如需引用请在「数据使用说明」中标注。\n")
+    if not selected:
+        parts.append("\n（数据库中无与你专业域匹配的年报章节。）\n")
     return "\n".join(parts)
 
 
@@ -114,12 +155,10 @@ def read_wiki_pages(method_text: str, wiki_root: Path) -> str:
         if pagename in pages or not pagename:
             continue
         found = None
-        # 精确匹配
         candidates = list(wiki_root.rglob(f"{pagename}.md"))
         if candidates:
             found = candidates[0]
         else:
-            # 按 title 模糊匹配
             for p in wiki_root.rglob("*.md"):
                 try:
                     text = p.read_text(encoding="utf-8")
@@ -150,7 +189,8 @@ def get_title(method_file: Path) -> str:
     return method_file.stem
 
 
-def build_expert_prompt(expert_id: str, filename: str, ts_code: str, name: str, data_text: str, annual_text: str, wiki_root: Path) -> str:
+def build_expert_prompt(expert_id: str, filename: str, ts_code: str, name: str,
+                        data_text: str, annual_text: str, data_date: str, wiki_root: Path) -> str:
     method_file = wiki_root / "experts" / f"{filename}.md"
     if not method_file.exists():
         raise FileNotFoundError(f"专家文件缺失: {method_file}")
@@ -191,7 +231,7 @@ def build_expert_prompt(expert_id: str, filename: str, ts_code: str, name: str, 
 
 ## 目标公司原始数据
 
-以下是 {name}（{ts_code}）的完整财务与行情数据。所有数据来自 Tushare Pro，已经过 Python 数据管道处理。
+以下是 {name}（{ts_code}）的完整财务与行情数据。所有数据来自 Tushare Pro，已经过 Python 数据管道处理。数据基准日：{data_date}。
 
 原始数据 JSON 的 `industry` 字段包含目标公司所在行业的横向对比（均值、中位数、P25/P75 分位、目标公司在行业中的排名百分位）。**如果你的方法论需要做行业对比，请优先使用 `industry.industry_stats` 和 `industry.target` 中的实际数据，不要编造「行业平均」。**
 
@@ -201,7 +241,7 @@ def build_expert_prompt(expert_id: str, filename: str, ts_code: str, name: str, 
 
 ## 公司年报与管理层的自述（最近 3-5 年关键章节）
 
-{annual_text if annual_text else "（本次未成功抓取到公司年报文本。请仅基于上方财务数据进行分析，并在「数据使用说明」中标注「年报文本不可得」。）"}
+{annual_text}
 
 ## 你的任务
 
@@ -230,6 +270,7 @@ def build_expert_prompt(expert_id: str, filename: str, ts_code: str, name: str, 
 - 🚫 **禁止无来源对比**：不得使用「行业平均」「市场普遍」「据统计」「历史中枢」「行业常见水平」等无法追溯到上方原始数据的断言。若必须做行业/历史对比，必须标注「数据不可得」。
 - 🚫 **禁止未经核对的历史断言**：在写出「首次」「连续 N 年」「历史新高/最低」「上市以来首次」等表述前，必须列出完整比较年份的数据并逐项核对。若发现不符合，立即修正措辞。
 - 🚫 **frontmatter 格式**：直接以 `---` 开头和结束，**不要**用 ```` ```yaml ```` 代码块包裹，否则裁判长无法自动解析。
+- 🚫 **frontmatter 中 `data_date` 已预填为本次数据基准日，禁止修改或省略**——它用于校验你的分析是否与本次数据批次一致。
 - ✅ **VETO 必须进 frontmatter**：如果触发 VETO，`veto_triggers` 字段必须非空，正文中必须标注 ⛔ VETO。
 
 ## 输出格式
@@ -239,6 +280,7 @@ def build_expert_prompt(expert_id: str, filename: str, ts_code: str, name: str, 
 ```
 ---
 expert_id: "{expert_id}"
+data_date: "{data_date}"
 score: <0-100 整数>
 verdict: PASS | WARN | VETO
 veto_triggers: []
@@ -273,219 +315,53 @@ veto_triggers: []
 """
 
 
-def build_reviewer_prompt(num: int, ts_code: str, skill_root: Path, wiki_root: Path) -> str:
-    focus = {
-        1: """**你的深度领域：数据可追溯性 + 内部一致性**
-- 至少验证 15 个报告中的数字在原始数据中可溯源
-- 全文搜索关键指标（PE、ROE、毛利率、营收），确认前后章节数值一致
-- 抽查 3 个派生计算（如 Graham Number、PEG、CAGR）用 Bash 独立重算""",
-        2: """**你的深度领域：方法论忠实度 + 逻辑与表述**
-- 至少查阅 4 位专家的 wiki 方法论原文，逐项核对必检项覆盖
-- 识别报告中的循环论证、因果倒置、模糊措辞
-- 检查每位专家的核心发现是否都在报告中有体现""",
-        3: """**你的深度领域：裁判长诚实性 + 全文交叉验证**
-- 逐行对照裁判规则冲突矩阵与裁判长裁决，确认没有引用不存在的矩阵行
-- 逐位检查专家底稿中的关键否定意见是否被裁判长回应（而非忽略）
-- 用 Bash 重取全部 7 个子命令的数据，做一轮完整的独立交叉验证"""
-    }[num]
-
-    return f"""你是 invest-skill 的**独立评审员 #{num}**。你与其他评审员完全隔离，互不知晓对方的存在和判断。
-
-## 你的角色
-
-你不是重新分析公司。你是**质量核查员**——核查报告是否诚实、准确、逻辑自洽。
-
-## 你的权限
-
-- 📚 **Read**：读取 invest-wiki 任何方法论页面验证报告声称；读取所有评审材料文件
-- 🔧 **Bash**：调用 `python3 shared/data_tools.py <subcommand> {ts_code}` 重取数据交叉验证
-
-## 评审材料（用 Read 工具按需读取）
-
-核心材料：
-- **最终报告**：`{skill_root}/reports/invest_tool/{ts_code}.md`
-
-事实基准：
-- **原始数据**：`/tmp/invest_data_{ts_code}.json`（所有报告数字必须可追溯到此文件）
-
-专家底稿：
-- `/tmp/invest_result_{ts_code}_financial-auditor.md`
-- `/tmp/invest_result_{ts_code}_value-valuator.md`
-- `/tmp/invest_result_{ts_code}_growth-assessor.md`
-- `/tmp/invest_result_{ts_code}_moat-analyst.md`
-- `/tmp/invest_result_{ts_code}_cognitive-controller.md`
-- `/tmp/invest_result_{ts_code}_macro-cyclist.md`
-- `/tmp/invest_result_{ts_code}_management-auditor.md`
-
-裁判规则：
-- `{wiki_root}/adjudicator/裁判长-多框架裁判规则.md`
-
-方法论依据（按需读取）：
-- `{wiki_root}/experts/01-财务排雷官.md`
-- `{wiki_root}/experts/02-价值估值师.md`
-- `{wiki_root}/experts/03-成长质量师.md`
-- `{wiki_root}/experts/04-护城河分析师.md`
-- `{wiki_root}/experts/05-认知风控官.md`
-- `{wiki_root}/experts/06-宏观周期师.md`
-- `{wiki_root}/experts/07-管理层审计师.md`
-
-**工作目录**：`{skill_root}`
-
-## 评审流程
-
-### 第一步：读取核心材料
-
-首先读取最终报告。然后根据需要选择性读取原始数据、专家底稿、裁判规则、方法论文件。
-
-### 第二步：执行强制性验证清单
-
-- [ ] **数据重取验证**：用 Bash 执行 `python3 shared/data_tools.py market {ts_code}` 和 `python3 shared/data_tools.py indicators {ts_code}`，将输出与报告中至少 5 个关键数字交叉比对
-- [ ] **VETO 矩阵核查**：逐行对照裁判规则中的 VETO 条件表，检查裁判长裁决是否逐项覆盖、结论是否正确
-- [ ] **加权评分重算**：从各专家 frontmatter 提取 score，按 wiki 权重独立重算综合分，与裁判长结果比对
-- [ ] **冲突矩阵逐行对照**：将裁判长的冲突裁决与 wiki 冲突矩阵逐行比对，确认没有引用不存在的矩阵行
-- [ ] **方法论抽查**：选择至少 3 位专家的 wiki 方法论文件，列出其必检项清单，逐项对照专家输出是否全部覆盖
-- [ ] **交叉比对**：选择至少 5 对「不同专家对同一基础数据的描述」，检查是否存在矛盾且裁判长未识别
-
-### 第三步：重点关注区域
-
-1. **裁判长 VETO 检查表**——遗漏一项就是 -20 分。
-2. **专家 frontmatter 与实际分析的一致性**。
-3. **「行业平均」「市场普遍」「据统计」「历史中枢」等无来源对比断言**——扣 1.4（-10/个）。
-4. **加权评分的认知修正**——wiki 规定认知风控官 WARN 触发 8.5 折，VETO 触发 7 折。
-5. **Fisher 二季度触发器**——逐季验算单季利润增速。
-
-### 第四步：差异化深度核查
-
-{focus}
-
-## 评审规则：扣分制
-
-从 **100 分**起扣。同一问题跨多个类别，只扣最高的一项。
-
-### 一、数据可追溯性（满分 25）
-
-| # | 扣分项 | 扣分 | 检查方式 |
-|---|--------|:----:|---------|
-| 1.1 | 报告中的数字在原始数据中找不到来源 | -8/个 | 在 `/tmp/invest_data_{ts_code}.json` 中搜索 |
-| 1.2 | 引用了不存在的字段名 | -5/个 | 对照原始数据 JSON 的 key |
-| 1.3 | 单位换算错误 | -10/个 | 核对数量级 |
-| 1.4 | 使用了「行业平均」「市场普遍」「据统计」「历史中枢」等无来源对比数据 | -10/个 | 在原始数据中搜索来源 |
-| 1.5 | 数字明显不合常理但未被质疑 | -12/个 | 常识判断 + data_tools 验证 |
-
-### 二、方法论忠实度（满分 25）
-
-| # | 扣分项 | 扣分 | 检查方式 |
-|---|--------|:----:|---------|
-| 2.1 | 专家的结论与其 wiki 方法论矛盾 | -15/个 | 读 wiki 对照 |
-| 2.2 | 专家跳过了方法论中标记为「必检」的检查项 | -8/个 | 列出必检项对照 |
-| 2.3 | VETO 条件触发但专家未标注 ⛔ VETO | -20/个 | 对照裁判长规则 |
-| 2.4 | 专家的分析引用了 wiki 中不存在的概念 | -10/个 | 搜索 wiki 目录 |
-
-### 三、裁判长诚实性（满分 25）
-
-| # | 扣分项 | 扣分 | 检查方式 |
-|---|--------|:----:|---------|
-| 3.1 | 裁判长选择性忽略某位专家的关键否定意见 | -15/个 | 底稿 vs 裁决 |
-| 3.2 | 裁判长的 VETO 检查遗漏了某位专家触发的 VETO 条件 | -20/个 | frontmatter `veto_triggers` vs 裁决 |
-| 3.3 | 加权评分计算错误 | -8/处 | 独立重算 |
-
-### 四、内部一致性（满分 15）
-
-| # | 扣分项 | 扣分 | 检查方式 |
-|---|--------|:----:|---------|
-| 4.1 | 不同专家对同一数据源得出矛盾结论，裁判长未识别 | -10/对 | 交叉比对 |
-| 4.2 | 报告前后矛盾 | -10/处 | 全文搜索关键指标 |
-
-### 五、逻辑与表述（满分 10）
-
-| # | 扣分项 | 扣分 |
-|---|--------|:----:|
-| 5.1 | 循环论证 | -5/处 |
-| 5.2 | 因果倒置 | -5/处 |
-| 5.3 | 某位专家的核心发现完全没有出现在报告中 | -10/位 |
-
-> 扣分必须给出具体证据。
-
-## 输出格式
-
-```markdown
-## 评审报告（评审员 #{num}）
-
-### 评审过程
-（简述验证动作和强制性清单完成情况。）
-
-### 深度核查
-（差异化领域发现。）
-
-### 扣分明细
-| 条款 | 问题描述 | 证据 | 扣分 |
-|------|---------|------|:---:|
-| ... | ... | ... | ... |
-
-### 观察项（不扣分）
-
-### 得分汇总
-| 检查维度 | 满分 | 扣分 | 得分 |
-|---------|:----:|:----:|:----:|
-| 数据可追溯性 | 25 | -X | XX |
-| 方法论忠实度 | 25 | -X | XX |
-| 裁判长诚实性 | 25 | -X | XX |
-| 内部一致性 | 15 | -X | XX |
-| 逻辑与表述 | 10 | -X | XX |
-| **总分** | **100** | **-X** | **XX** |
-
-### 评审结论
-**评审员 #{num} 得分：XX / 100**
-
-**判定：[ ] PASS（≥80 分） [ ] FLAGGED（60-79 分） [x] REJECT（<60 分）**
-```
-"""
-
-
-def main():
-    parser = argparse.ArgumentParser(description="生成 invest-skill 专家/评审员 prompt")
+def main() -> int:
+    parser = argparse.ArgumentParser(description="生成 invest-skill 专家 prompt")
     parser.add_argument("ts_code", help="股票代码，如 603605.SH")
-    parser.add_argument("--name", help="公司中文名（可选，自动从 stock-info 获取）")
+    parser.add_argument("--name", help="公司中文名（可选，自动从数据中获取）")
     args = parser.parse_args()
 
     ts_code = args.ts_code
-    data_text = fetch_data(ts_code)
+    try:
+        data_text = fetch_data(ts_code)
+    except RuntimeError as e:
+        print(f"✗ {e}", file=sys.stderr)
+        return 2
+
     data_file = Path(f"/tmp/invest_data_{ts_code}.json")
     data_file.write_text(data_text, encoding="utf-8")
-    print(f"[1/3] 数据已写入 {data_file}")
+    print(f"[1/2] 数据已写入 {data_file}")
 
-    # 获取公司名
-    name = args.name
-    if not name:
-        try:
-            import json
-            d = json.loads(data_text)
-            name = d.get("stock_info", {}).get("name", ts_code)
-        except Exception:
-            name = ts_code
+    try:
+        data_json = json.loads(data_text)
+    except json.JSONDecodeError:
+        data_json = {}
+    name = args.name or data_json.get("stock_info", {}).get("name", ts_code)
+    data_date = str(data_json.get("market", {}).get("trade_date") or "unknown")
 
-    # 获取年报文本
-    annual_text = fetch_annual_reports(ts_code, years=5)
+    print("[prepare] 获取年报文本 ...", flush=True)
+    try:
+        rows = fetch_annual_rows(ts_code, years=5)
+    except RuntimeError as e:
+        print(f"✗ {e}", file=sys.stderr)
+        return 2
+
     annual_file = Path(f"/tmp/invest_annual_{ts_code}.txt")
-    annual_file.write_text(annual_text, encoding="utf-8")
-    print(f"[1/3] 年报文本已写入 {annual_file}")
+    annual_file.write_text(dump_annual_full(rows), encoding="utf-8")
+    print(f"[1/2] 年报全量文本已写入 {annual_file}（{len(rows)} 个章节）")
 
-    # 生成专家 prompt
     for expert_id, filename in EXPERTS:
-        prompt = build_expert_prompt(expert_id, filename, ts_code, name, data_text, annual_text, WIKI_ROOT)
+        annual_text = format_annual_text(rows, expert_id)
+        prompt = build_expert_prompt(
+            expert_id, filename, ts_code, name, data_text, annual_text, data_date, WIKI_ROOT
+        )
         prompt_file = Path(f"/tmp/invest_prompt_{ts_code}_{expert_id}.txt")
         prompt_file.write_text(prompt, encoding="utf-8")
-        print(f"[2/3] 专家 prompt: {prompt_file}")
-
-    # 生成评审员 prompt
-    for num in [1, 2, 3]:
-        prompt = build_reviewer_prompt(num, ts_code, SKILL_ROOT, WIKI_ROOT)
-        prompt_file = Path(f"/tmp/invest_review_prompt_{ts_code}_{num}.txt")
-        prompt_file.write_text(prompt, encoding="utf-8")
-        print(f"[3/3] 评审员 prompt: {prompt_file}")
+        print(f"[2/2] 专家 prompt: {prompt_file}（{len(prompt)} 字符）")
 
     print("=== 全部 prompt 准备完成 ===")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

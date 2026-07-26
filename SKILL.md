@@ -1,11 +1,11 @@
 ---
 name: invest-skill
-version: 0.2.0
+version: 0.4.0
 description: |
   A 股公司深度投资分析技能。基于 7+1 专家团（财务排雷官、价值估值师、成长质量师、
   护城河分析师、认知风控官、宏观周期师、管理层审计师 + 裁判长），
-  主 Agent 按顺序角色切换，依次以 7 位专家的身份独立分析同一份原始数据。
-  每次切换重读该专家的 wiki 方法论，确保各域视角独立。
+  由宿主 Agent 使用其原生子代理机制并行执行 7 位专家分析，每个子代理拥有完全隔离的上下文，
+  确保各域视角独立、互不污染。不绑定任何特定 agent 软件。
   触发条件：用户要求"分析"某家 A 股公司、提到股票代码、或明确要求做投资分析。
 metadata:
   trigger_keywords:
@@ -21,7 +21,7 @@ metadata:
 
 # invest-skill — A 股深度投资分析
 
-> 基于 invest-wiki 7+1 专家团，通过角色切换顺序执行 7 域独立分析，输出标准化投资报告。适用于 Codex / Claude Code / Hermes 等任意 Agent。
+> 基于 invest-wiki 7+1 专家团，通过独立 agent 进程并行执行 7 域独立分析，输出标准化投资报告。适用于 Codex / Claude Code / Hermes 等任意 Agent。
 
 ## 架构原则
 
@@ -34,20 +34,22 @@ metadata:
        ↓
   python3 shared/data_tools.py all <ts_code>  →  共享数据 JSON
        ↓
-  角色切换：依次以 7 位专家身份独立分析（同一会话，方法论隔离）
-       ├── ① 财务排雷官   → /tmp/invest_result_…_financial-auditor.md
-       ├── ② 价值估值师   → /tmp/invest_result_…_value-valuator.md
-       ├── ③ 成长质量师   → /tmp/invest_result_…_growth-assessor.md
-       ├── ④ 护城河分析师 → /tmp/invest_result_…_moat-analyst.md
-       ├── ⑤ 认知风控官   → /tmp/invest_result_…_cognitive-controller.md
-       ├── ⑥ 宏观周期师   → /tmp/invest_result_…_macro-cyclist.md
-       └── ⑦ 管理层审计师 → /tmp/invest_result_…_management-auditor.md
+  python3 scripts/prepare_prompts.py <ts_code>  →  7 份独立 prompt 文件
        ↓
-  收齐 7 份分析 → 裁判长综合裁决 → 撰写报告 → 结构化自评审
+  宿主 Agent 用原生子代理机制 spawn 7 个子代理    ← 首选：上下文天然隔离，不绑定 agent 软件
+  （Kimi Code Agent/AgentSwarm、Claude Code Task、Codex subagent …）
+          或 bash scripts/run_experts.sh <ts_code>  ← 备选：headless/cron 环境（无宿主子代理时）
+          ↓ 7 位专家独立分析（每子代理只读自己的 prompt 文件）
+          ├── 子代理 1 ← prompt_…_financial-auditor.txt  →  /tmp/invest_result_…_financial-auditor.md
+          ├── 子代理 2 ← prompt_…_value-valuator.txt     →  /tmp/invest_result_…_value-valuator.md
+          ├── …（共 7 个独立子代理）
+          └── 全部完成
+          ↓
+      收齐 7 份分析 → 裁判长综合裁决 → 撰写报告 → 结构化自评审 → 环境清理
 ```
 
 **关键分工**：
-- **LLM（大脑）**：加载 wiki 专家团 → 角色切换执行 7 域分析 → 裁判长综合裁决 → 结构化自评审
+- **LLM（大脑）**：加载 wiki 专家团 → spawn 7 个独立子代理并行执行 7 域分析 → 裁判长综合裁决 → 结构化自评审 → 环境清理
 - **Python（手）**：`shared/data_tools.py` 只负责取数 + 基础数学（CAGR、比率），不包含任何评分/评级/结论
 - **wiki（知识）**：`../invest-wiki/04_stock-analysis-expert/` 是专家团的**唯一结构来源**，专家的角色定义、师承、核心使命、检查清单全部由 wiki 定义，skill 不做硬编码
 
@@ -79,7 +81,7 @@ python3 shared/data_tools.py forecast <ts_code>
 
 ### 第三步：加载专家团配置
 
-> 💡 skill 只读取 wiki 中的**编排信息**（有哪些专家、什么顺序、裁判规则是什么）。每位专家的具体方法论内容由主 Agent 在角色切换时从 wiki 加载。
+> 💡 skill 只读取 wiki 中的**编排信息**（有哪些专家、什么顺序、裁判规则是什么）。每位专家的具体方法论内容由 `prepare_prompts.py` 在生成 prompt 时从 wiki 自动注入。
 
 按顺序读取以下文件（只需一次）：
 
@@ -128,35 +130,101 @@ python3 shared/data_tools.py annual-report <ts_code>
 
 **每位专家必须在分析中执行「反叙事」检查**：用财务数字交叉验证管理层在年报中的说法，识别承诺未兑现、宏大叙事掩盖问题、战略方向反复变更等风险信号。认知风控官需额外完成「管理层叙事审计」。
 
-### 第五步：角色切换执行 7 位专家分析
 
-> ⚠️ **方法论隔离原则**：每次切换到下一位专家前，必须重新读取该专家的 wiki 方法论页面。不要依赖前一位专家的分析——每位专家有独立的知识域和检查清单。
-> 
-> ⚠️ **数据只读原则**：所有专家的分析必须基于同一份原始数据（`/tmp/invest_data_{code}.json`），不得基于其他专家的输出做判断。
 
-**流程**：主 Agent 按顺序扮演 7 位专家角色。每轮：读取该专家的 wiki 方法论 → 读取原始数据 → 用该专家的框架分析 → 写输出到 `/tmp/invest_result_{code}_{expert}.md` → 切换下一位。
+### 第四步（续）：数据完整性检查（Tushare MCP 补充）⛔ 强制检查点
 
-#### 5a. 角色切换协议
+> ⛔ **在进入第五步之前，必须完成本节检查。不可跳过。**
 
-> 💡 不 spawn 子进程。主 Agent 按顺序在单会话内扮演 7 位专家。通过**每次切换重读该专家 wiki 方法论**来实现认知隔离。
+执行完 `data_tools.py all` 后，读入 `/tmp/invest_data_{code}.json`，按以下流程逐项检查并补充：
 
-**切换流程**（每轮执行一次）：
+**Step 1：逐项检查（非可选）**
+
+对以下 4 个字段执行显式检查，每一项都必须输出检查结果：
+
+| # | 检查字段 | JSON 路径 | 缺失判定 | 缺失时动作 |
+|----|---------|----------|---------|----------|
+| 1 | 商誉 | `balance.goodwill_yi` | 为 `null`/`None` | 调用 `mcp__tushareMcp__balancesheet` 查询最新年报 |
+| 2 | 季度现金流 | `quarterly.periods` | 数组长度 < 4 | 调用 `mcp__tushareMcp__cashflow` 查询近 8 季 |
+| 3 | 审计意见 | 字段缺失 | 任何情况下都缺失（`data_tools.py all` 不含此字段） | 调用 `mcp__tushareMcp__fina_audit` 查询最新年报 |
+| 4 | 扣非净利润 | `annual.annual_data[*].non_recurring_pct` | 每股 `non_recurring_pct` 为 `null`/`None` | 用 `non_oper_income / operate_profit` 估算（`data_tools.py` 已输出）；若仍不足，调用 `mcp__tushareMcp__income` |
+
+**Step 2：执行 MCP 补充（对缺失项）**
+
+对每个标记为「缺失」的字段，调用一次对应的 MCP 工具。在分析日志中记录：
 
 ```
-1. 读方法论：Read ../invest-wiki/04_stock-analysis-expert/experts/{专家文件}.md
-2. 读原始数据：Read /tmp/invest_data_{code}.json
-3. 用该专家的框架分析（仅关注该专家域的内容，不越界）
-4. 写输出：/tmp/invest_result_{code}_{expert_id}.md
-5. 在 log 中记录关键发现（一句话），供裁判长综合时参考
-6. 切换下一位专家：回到步骤 1
+[MCP补充] 商誉 — balancesheet → goodwill=XXX亿
+[MCP补充] 审计意见 — fina_audit → 标准无保留意见
+[MCP补充] <字段> — <数据可用/确认缺失>
 ```
 
-**方法论隔离检查**（每轮结束时自查）：
-- 我的分析是否仅基于本专家的框架？
-- 我是否引用了其他专家的结论？（如果是，删除）
-- 所有数字是否来自原始数据而非其他专家输出？（如果不是，纠正）
+**Step 3：注入分析流程**
 
-**输出格式**（每位专家统一）：
+MCP 补充的数据不修改 `/tmp/invest_data_{code}.json`。在第五步中，当前专家在分析中如遇对应字段为 None，主 Agent 应直接引用 MCP Step 2 中已获取的数据。
+
+**MCP 工具速查**：
+
+| 数据需求 | MCP 工具名 | 示例调用 |
+|---------|-----------|---------|
+| 资产负债表科目 | `mcp__tushareMcp__balancesheet` | `ts_code='603605.SH', end_date='20251231'` |
+| 季度现金流 | `mcp__tushareMcp__cashflow` | `ts_code='603605.SH', start_date='20240101', end_date='20260331'` |
+| 利润表科目 | `mcp__tushareMcp__income` | `ts_code='603605.SH', end_date='20251231'` |
+| 审计意见 | `mcp__tushareMcp__fina_audit` | `ts_code='603605.SH', end_date='20251231'` |
+
+> ⚠️ **不得跳过**：即使所有字段看起来都有值，也必须逐项检查并输出检查日志。这是分析质量的门槛守卫。
+
+### 第五步：执行专家分析
+
+**首选路径：宿主 Agent 原生子代理（agent 通用，不绑定具体软件）**
+
+宿主 Agent 为 7 份 prompt 各 spawn 一个独立子代理。使用当前平台自带的子代理机制：
+
+| 平台 | 子代理机制 |
+|------|-----------|
+| Kimi Code | `Agent` / `AgentSwarm` 工具 |
+| Claude Code | `Task` 工具 |
+| Codex | subagent 机制 |
+| 其他 Agent | 其自带的子代理/任务委派能力 |
+
+每个子代理只读自己的 prompt 文件，写自己的 result 文件。spawn 模板：
+
+```
+读取 /tmp/invest_prompt_<code>_<expert_id>.txt —— 这是你的完整任务书，
+包含你的专家角色方法论、原始数据和输出格式要求。
+严格按其中指示完成分析，将最终结果（含 YAML frontmatter）写入
+/tmp/invest_result_<code>_<expert_id>.md。
+禁止读取其他专家的 prompt 或 result 文件，禁止访问其他子代理。
+完成后只需回复一行确认（不要把分析全文贴回来）。
+```
+
+子代理可并行 spawn（如 Kimi Code 的 AgentSwarm）也可顺序 spawn，隔离性等价——每个子代理都是全新会话上下文，只含自己的 prompt 文件内容。
+
+```bash
+# 第一步：生成 7 位专家的独立 prompt（自动注入 wiki 方法论 + 原始数据）
+python3 scripts/prepare_prompts.py <code>
+
+# 第二步：宿主 Agent 按上方模板 spawn 7 个子代理，每个处理一份 prompt
+
+# 第三步：检查结果
+python3 scripts/collect_results.py <code> --json
+```
+
+**备选路径：`run_experts.sh`（headless / cron 环境）**
+
+当运行环境没有宿主 Agent 的子代理能力（如 cron 触发的裸 shell、CI 管线）时，在 shell 级别启动独立 agent 进程，达到同样的隔离效果：
+
+```bash
+bash scripts/run_experts.sh <code>                     # 按 codex → claude → hermes 自动检测 CLI
+bash scripts/run_experts.sh <code> --agent claude      # 或显式指定后端
+RUN_EXPERTS_CONCURRENCY=5 bash scripts/run_experts.sh <code>   # 并发数，默认 3
+```
+
+两条路径的文件契约完全相同（prompt/result 文件路径一致），下游 `collect_results.py`、`assemble_report.py` 无感。
+
+**为什么必须是独立子代理/进程**：同一会话内顺序扮演 7 位专家，前序上下文必然泄漏到后续分析。独立子代理（或独立进程）实现了真正的认知隔离——每位专家的上下文只包含该专家的方法论和原始数据，不包含其他专家的任何分析和结论。
+
+**输出格式**（每位专家统一，由 prompt 中的模板定义）：
 
 ```yaml
 ---
@@ -179,28 +247,6 @@ veto_triggers: []
 ## 数据使用说明
 （用了哪些数据，哪些缺失）
 ```
-
-#### 5b. 角色切换执行清单
-
-按优先顺序依次执行（禁止并行，确保方法论隔离）：
-
-| 顺序 | 专家 ID | 方法论文件 | 核心关注域 |
-|:----:|---------|-----------|-----------|
-| ① | financial-auditor | `01-财务排雷官.md` | ROE趋势、利润质量、资产负债结构、RED FLAG |
-| ② | value-valuator | `02-价值估值师.md` | PE/PB分位、安全边际、DCF合理性、跨市场比较 |
-| ③ | growth-assessor | `03-成长质量师.md` | 营收CAGR、利润率趋势、Fisher二季度触发器 |
-| ④ | moat-analyst | `04-护城河分析师.md` | 品牌/转换成本/网络效应/成本优势、护城河趋势 |
-| ⑤ | cognitive-controller | `05-认知风控官.md` | 锚定效应、叙事谬误、确认偏误、管理层叙事审计 |
-| ⑥ | macro-cyclist | `06-宏观周期师.md` | 行业周期定位、宏观关联、政策影响 |
-| ⑦ | management-auditor | `07-管理层审计师.md` | 管理层质量、战略一致性、资本配置能力 |
-
-**执行注意事项**：
-- 每位专家分析基于相同的原始数据 JSON + 该专家的 wiki 方法论
-- 禁止引用前序专家的分析结论（方法论隔离原则）
-- 如果某项检查因数据缺失无法完成，标注「数据不可得」而非跳过
-- 输出格式统一为 YAML frontmatter + Markdown 正文
-
-**容错**：某位专家分析不完整 → 标注不确定性来源 → 继续下一位。所有 7 位完成后裁判长统一评估缺失影响。
 
 ### 第六步：裁判长综合裁决
 
@@ -253,7 +299,7 @@ veto_triggers: []
 
 ### 第八步：结构化自评审（扣分制）
 
-> ⚠️ 不 spawn 独立评审员。主 Agent 完成报告后，以审查模式重新审视自己的输出。分三个独立维度执行核查，每个维度从 100 分起扣。
+> ⚠️ 不 spawn 独立评审员。主 Agent 完成报告后，以审查模式重新审视自己的输出。分四个维度执行核查，各维度从满分起扣（25/25/25/15，总分 90）。
 
 #### 评审流程
 
@@ -292,14 +338,6 @@ veto_triggers: []
 | 4.1 | 循环论证 | -5/处 |
 | 4.2 | 因果倒置 | -5/处 |
 | 4.3 | 某位专家的核心发现未出现在报告中 | -10/位 |
-
-#### 维度五：隔离性自检（满分 10）—— 角色切换模式专有
-
-| # | 扣分项 | 扣分 |
-|---|--------|:----:|
-| 5.1 | 发现某位专家引用了其他专家的分析结论（而非原始数据） | -10/处 |
-| 5.2 | 发现相邻专家的分析存在明显的措辞/逻辑继承 | -5/处 |
-
 #### 评审输出格式
 
 ```markdown
@@ -313,8 +351,7 @@ veto_triggers: []
 | 方法论忠实度 | 25 | -X | XX |
 | 裁判长诚实性 | 25 | -X | XX |
 | 逻辑与表述 | 15 | -X | XX |
-| 隔离性自检 | 10 | -X | XX |
-| **总分** | **100** | **-X** | **XX** |
+| **总分** | **90** | **-X** | **XX** |
 
 ### 扣分明细
 
@@ -324,17 +361,33 @@ veto_triggers: []
 
 ### 评审结论
 
-**总分：XX / 100**
-**判定：[ ] PASS（≥80分） [ ] FLAGGED（60-79分） [ ] REJECT（<60分）**
+**总分：XX / 90**
+**判定：[ ] PASS（≥72分） [ ] FLAGGED（60-71分） [ ] REJECT（<60分）**
 
 （必须勾选一个）
 ```
 
 #### 准出规则
 
-- ≥ 80 分 → 报告准出，附加评审结论到报告末尾
-- 60-79 分 → 报告标注 FLAGGED，列出需修正的问题
+- ≥ 72 分（总分 90 的 80%）→ 报告准出，附加评审结论到报告末尾
+- 60-71 分 → 报告标注 FLAGGED，列出需修正的问题
 - < 60 分 → 报告标注 REJECT，建议重新生成
+
+### 第九步：环境清理
+
+分析流程完成后，清理本次分析产生的中间文件和残留输出。
+
+清理内容：
+
+1. 删除 `/tmp/` 下的中间文件：
+   `/tmp/invest_data_{code}.json`、`/tmp/invest_prompt_{code}_*.txt`、`/tmp/invest_result_{code}_*.md`
+
+2. 删除 `reports/invest_tool/` 中的残留：
+   - 命名不规范的重复报告（如缺少交易所后缀的 `{code}.md`，正确格式是 `{ts_code}.md`）
+   - 草稿文件 `{ts_code}.draft.md`（如已有对应的正式报告 `{ts_code}.md`）
+   - 空子目录（如无有效文件的 `{code}/` 目录）
+
+⚠️ **清理边界**：只清理本次分析产生的文件。已存在的历史分析报告（如其他股票的正式报告）不得删除。
 
 ## 交叉验证与计算规范
 
@@ -343,7 +396,7 @@ veto_triggers: []
 - 应收/营收增速用同比（YoY）而非环比
 - data_tools 数据与手动计算不一致时，优先手动重算
 
-## 数据工具
+## 数据工具（两种路径）
 
 | 命令 | 输出 |
 |------|------|
@@ -362,14 +415,31 @@ veto_triggers: []
 
 代码格式：`300408.SZ` 或 `603605.SH`。也可用 6 位数字自动推断交易所。
 
+### 路径 B：Tushare MCP（Codex 原生支持）
+
+Codex 可通过 MCP 协议直接调用 Tushare API，无需经过 Python 脚本。适合实时查询和增量数据获取。
+
+需要预先添加 MCP server：
+
+```bash
+codex mcp add tushareMcp --url "https://api.tushare.pro/mcp/?token=<YOUR_TOKEN>"
+```
+
+**使用场景**：
+- 财报公告日当天立即获取数据（Python db 可能有延迟）
+- 补充查询 Python 数据工具未覆盖的字段（如分析师评级、龙虎榜、基金持仓）
+- 跨市场数据扩展
+
+> ⚠️ MCP 路径和 Python 工具互为补充，核心分析流程仍以 `data_tools.py all` 为主（格式一致、缓存稳定），MCP 用于补充和验证。
+
 ## 自动化脚本
 
 项目提供以下辅助脚本，减少手动拼接 prompt 和报告的工作量：
 
 | 脚本 | 作用 | 示例 |
 |------|------|------|
-| `scripts/prepare_prompts.py` | 生成 7 位专家 + 3 位评审员的 prompt 文件，并拉取全部原始数据 | `python3 scripts/prepare_prompts.py 603605.SH` |
-| `scripts/collect_results.py` | 收集并解析 7 位专家 + 3 位评审员的结果，输出 JSON 摘要；兼容裸 YAML 和 `\`\`\`yaml` 包裹的 frontmatter | `python3 scripts/collect_results.py 603605.SH --json` |
+| `scripts/prepare_prompts.py` | 生成 7 位专家的 prompt 文件，并拉取全部原始数据 | `python3 scripts/prepare_prompts.py 603605.SH` |
+| `scripts/collect_results.py` | 收集并解析 7 位专家的结果，输出 JSON 摘要；兼容裸 YAML 和 `\`\`\`yaml` 包裹的 frontmatter | `python3 scripts/collect_results.py 603605.SH --json` |
 | `scripts/assemble_report.py` | 自动嵌入专家原文、计算加权评分、生成裁判长裁决草稿；默认输出 `.draft.md`，需裁判长填充定性判断后 `--finalize` | `python3 scripts/assemble_report.py 603605.SH --name 珀莱雅` |
 
 **推荐工作流**：
@@ -378,10 +448,10 @@ veto_triggers: []
 # 1. 准备 prompt
 python3 scripts/prepare_prompts.py 603605.SH
 
-# 2. 角色切换执行 7 位专家分析（见第五步）
-# ...
+# 2. 执行专家分析：宿主 Agent 为 7 份 prompt 各 spawn 一个子代理（见第五步模板）
+#    （headless/cron 环境改用：bash scripts/run_experts.sh 603605.SH）
 
-# 3. 检查哪些专家/评审员缺失
+# 3. 检查哪些专家缺失
 python3 scripts/collect_results.py 603605.SH --json
 
 # 4. 生成报告草稿
@@ -399,3 +469,48 @@ python3 scripts/assemble_report.py 603605.SH --name 珀莱雅 --finalize
 | 行业特殊（如银行/保险） | 财务排雷官使用行业专用指标 |
 | 上市不满 3 年 | 降低成长质量师评分权重，标注「历史数据不足」 |
 | 跨市场（A+H 等） | 使用保守估值（两个市场取较低估值） |
+| 数据源不可用（API / 数据库 / MCP） | ⛔ **硬失败。** 终止分析，输出错误报告。**禁止**自行编造数据、**禁止**从非规范渠道（搜索引擎、LLM 记忆知识、第三方网站爬虫）补充数据继续分析流程。数据是分析的基石——数据缺失时，"不确定性过高"比"编造结论"诚实。 |
+| 年报文本不可得（Tushare + AKShare + 本地缓存全部失败） | ⛔ **硬失败。** 管理层审计师和反叙事验证（7 位专家共同责任）无法完成。**禁止**跳过反叙事步骤继续分析。标注"年报文本缺失，分析不完整"。 |
+
+## 自动化运维（v0.3.0 新增；v0.4.0 起交互式分析改用宿主子代理，本节脚本服务于 cron/headless 场景）
+
+### 定时分析流水线
+
+Cron 调度（工作日）：
+
+```
+20:00  daily_analysis.sh --sync-only  → 数据同步 + prompt 生成 → activity.jsonl
+21:00  cron_hermes_push.sh             → Hermes 读取 reports_today.sh → 推送用户
+每月1日 sync-all-stocks                 → 刷新全 A 股基础信息
+```
+
+### 运维脚本速查
+
+| 脚本 | 作用 |
+|------|------|
+| `scripts/cron_trigger.sh` | 每日分析的 cron 触发器（10:00 / 14:30）。通用 agent 后端：`--agent auto|codex|claude|hermes` 或环境变量 `AGENT`，默认 auto 按 codex→claude→hermes 检测（与 `run_experts.sh` 同序）。含超时（`TIMEOUT_MINUTES`，默认 60 分钟，超时退出码 124）、重试与结构化日志 |
+| `scripts/daily_analysis.sh` | 每日分析主脚本。从全 A 股动态随机选 N 只（`pick_stocks.py`），逐只执行数据同步→prompt 生成→可选 expert 分析→报告组装。支持 `--sync-only`（cron 用）、`--dry-run`、`--count N` |
+| `scripts/pick_stocks.py` | 从本地 DB 的 `stocks` 表中随机选取股票，排除科创/北交/ST。用法：`python3 pick_stocks.py <N> [seed]`，seed 默认取当日日期保证同一天幂等 |
+| `scripts/activity_log.sh` | 结构化活动日志库（source 后使用）。函数 `log_activity <phase> <code> <name> <status> <msg>`，输出 `logs/activity.jsonl`。自动检测调用方 agent（codex/claude/hermes/cron） |
+| `scripts/reports_today.sh` | 每日报告摘要输出。支持 `--date`、`--json`（Hermes 程序化消费）、`--activity`（活动日志）。输出含 `report_count` + `failure_count` + `failures` 数组 |
+| `scripts/hermes_push_prompt.txt` | 发给 Hermes 的推送指令 prompt，定义如何解析 `reports_today.sh --json`、格式化消息、推送报告和异常告警 |
+| `scripts/cron_hermes_push.sh` | Hermes 推送的 cron 触发器，调用 `hermes run` 执行 `hermes_push_prompt.txt` |
+
+### 活动日志格式
+
+`logs/activity.jsonl`，每行一条 JSON：
+
+```json
+{"ts":"2026-07-11T15:35:13Z","agent":"codex","phase":"report","code":"600298.SH","name":"安琪酵母","status":"success","msg":"HOLD 54分"}
+```
+
+字段：`ts`(UTC时间)、`agent`(调用方)、`phase`(sync/prompt/expert/report/session)、`code`、`name`、`status`(success/failure/skipped)、`msg`
+
+### Hermes 推送的消息类型
+
+| 条件 | 推送内容 |
+|------|---------|
+| `report_count > 0` 且 `failure_count == 0` | 📊 每日报告摘要（评分 + 评级 + 一行总评） |
+| `report_count > 0` 且 `failure_count > 0` | 📊 报告摘要 + ⚠️ 异常提醒 |
+| `report_count == 0` 且 `failure_count > 0` | ⚠️ 异常告警（全部失败） |
+| `report_count == 0` 且 `failure_count == 0` | 不推送 |
