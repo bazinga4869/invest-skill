@@ -51,6 +51,21 @@ class ReportGateTests(unittest.TestCase):
             digest,
         )
 
+    def test_prompt_bundle_hash_normalizes_batch_id_after_embedded_yaml(self):
+        sentinel = "__BATCH_ID_PLACEHOLDER__"
+        batch_id = "abcdef0123456789abcdef01"
+        prompt = (
+            "## 方法论\n\n---\ntitle: method\n---\n\n"
+            "```yaml\n---\n"
+            f'batch_id: "{sentinel}"\n'
+            "---\n```\n"
+        )
+        first = prompt_bundle_hash({"p": prompt}, sentinel)
+        second = prompt_bundle_hash(
+            {"p": prompt.replace(sentinel, batch_id)}, batch_id
+        )
+        self.assertEqual(first, second)
+
     def test_checklist_declared_totals_match_items(self):
         checklist = load_checklist()
         for info in checklist.values():

@@ -95,16 +95,14 @@ def prompt_bundle_hash(prompts: dict[str, str | bytes], batch_id: str = "") -> s
 
 
 def _replace_batch_id_in_frontmatter(raw: bytes, needle: bytes) -> bytes:
-    """仅替换 YAML frontmatter（首对 ---）内的 batch_id 值。"""
+    """替换 prompt 中 batch_id: 行的批次值。
+
+    prompt 正文会先嵌入专家方法论的 YAML frontmatter，再在输出模板里放置
+    真实 batch_id；如果只处理首对 `---`，就碰不到需要归一化的那一行。
+    """
     lines = raw.split(b"\n")
-    in_fm = False
     for i, line in enumerate(lines):
-        if line.strip() == b"---":
-            in_fm = not in_fm
-            if not in_fm:
-                break
-            continue
-        if in_fm and b"batch_id:" in line and needle in line:
+        if b"batch_id:" in line and needle in line:
             lines[i] = line.replace(needle, b"__BATCH_ID__")
     return b"\n".join(lines)
 
