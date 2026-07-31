@@ -68,7 +68,7 @@ for e in data['experts']:
     print(f\"{e['id']}:{e['file']}\")
 ")
 
-CONCURRENCY="${RUN_EXPERTS_CONCURRENCY:-3}"
+CONCURRENCY="${RUN_EXPERTS_CONCURRENCY:-7}"
 EXPERT_TIMEOUT="${EXPERT_TIMEOUT:-1800}"
 LOG_DIR="$SKILL_ROOT/logs/experts"
 mkdir -p "$LOG_DIR"
