@@ -32,3 +32,8 @@ Thumbs.db
 # Runtime outputs
 analysis/
 outputs/
+
+# Analysis runtime outputs
+output/
+experts/
+analysis_*.md
