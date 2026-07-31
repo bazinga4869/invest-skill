@@ -103,7 +103,45 @@ require_prompts() {
     fi
 }
 
-# --- 执行单个专家（后台运行） ---
+# --- 专家结果修复（带着校验失败清单让 agent 定向修复）---
+fix_expert() {
+    local expert_id="$1"
+    local pf rf lf
+    pf="$(prompt_file "$expert_id")"
+    rf="$(result_file "$expert_id")"
+    lf="$(expert_log "$expert_id")"
+    local fix_prompt="/tmp/invest_fix_${TS_CODE}_${expert_id}.txt"
+
+    # 收集该校验失败的专家具体问题
+    python3 "$SKILL_ROOT/scripts/collect_results.py" "$TS_CODE" --failing --json > /tmp/invest_fix_errors_${TS_CODE}.json 2>/dev/null
+    local problems
+    problems=$(python3 -c "
+import json, sys
+data = json.load(open('/tmp/invest_fix_errors_${TS_CODE}.json'))
+expert = data.get('${expert_id}', {})
+print(chr(10).join(expert.get('problems', ['（校验错误详情不可得）'])))
+" 2>/dev/null)
+
+    # 构造修复 prompt：原始任务 + 上一轮的失败输出 + 具体问题
+    {
+        echo '⬛⬛⬛ 修复任务 — 只修正以下问题，不改动其余内容 ⬛⬛⬛'
+        echo ''
+        echo '你的上一轮分析因以下问题未通过校验：'
+        echo "$problems"
+        echo ''
+        echo '请基于原始任务书重新输出完整分析，确保上述问题全部修正。'
+        echo '输出格式：直接以 --- YAML frontmatter 开头。'
+        echo ''
+        echo '══════ 原始任务书 ══════'
+        cat "$pf"
+    } > "$fix_prompt"
+
+    echo "  [fix] $expert_id — 带着校验失败清单定向修复…" >> "$lf"
+    timeout "$EXPERT_TIMEOUT" codex exec -o "$rf" - < "$fix_prompt" >> "$lf" 2>&1
+    rm -f "$fix_prompt" /tmp/invest_fix_errors_${TS_CODE}.json
+}
+
+# --- 执行单个专家（后台运行）---
 run_expert() {
     local expert_id="$1"
     local pf rf lf
@@ -192,10 +230,25 @@ run_batch() {
 # --- 校验结果 ---
 check_results() {
     cd "$SKILL_ROOT"
-    if python3 scripts/collect_results.py "$TS_CODE" --check \
-        && python3 scripts/checklist_audit.py --code "$TS_CODE"; then
-        return 0
-    fi
+    local max_fix_rounds=2
+    local round=0
+    while [[ $round -le $max_fix_rounds ]]; do
+        if python3 scripts/collect_results.py "$TS_CODE" --check \
+            && python3 scripts/checklist_audit.py --code "$TS_CODE"; then
+            return 0
+        fi
+        [[ $round -ge $max_fix_rounds ]] && break
+        round=$((round + 1))
+        echo "[fix] 第 $round/$max_fix_rounds 轮修复 — 定向修正校验失败的专家…"
+        local -a fix_pids=()
+        while IFS= read -r expert_id; do
+            fix_expert "$expert_id" &
+            fix_pids+=($!)
+        done < <(python3 scripts/collect_results.py "$TS_CODE" --failing 2>/dev/null)
+        for pid in "${fix_pids[@]}"; do
+            wait "$pid" || true
+        done
+    done
     return 1
 }
 
