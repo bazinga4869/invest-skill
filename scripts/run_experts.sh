@@ -113,7 +113,7 @@ fix_expert() {
     local fix_prompt="/tmp/invest_fix_${TS_CODE}_${expert_id}.txt"
 
     # 收集该校验失败的专家具体问题
-    python3 "$SKILL_ROOT/scripts/collect_results.py" "$TS_CODE" --failing --json > /tmp/invest_fix_errors_${TS_CODE}.json 2>/dev/null
+    python3 "$SKILL_ROOT/scripts/collect_results.py" "$TS_CODE" --failing --json         > /tmp/invest_fix_errors_${TS_CODE}.json 2>/dev/null || true
     local problems
     problems=$(python3 -c "
 import json, sys
@@ -137,7 +137,10 @@ print(chr(10).join(expert.get('problems', ['（校验错误详情不可得）'])
     } > "$fix_prompt"
 
     echo "  [fix] $expert_id — 带着校验失败清单定向修复…" >> "$lf"
-    timeout "$EXPERT_TIMEOUT" codex exec -o "$rf" - < "$fix_prompt" >> "$lf" 2>&1
+    local model="${EXPERT_MODEL:-}"
+    local model_arg=()
+    [[ -n "$model" ]] && model_arg=(-m "$model")
+    timeout "$EXPERT_TIMEOUT" codex exec         -o "$rf"         --sandbox danger-full-access         --add-dir /tmp         "${model_arg[@]}"         - < "$fix_prompt" >> "$lf" 2>&1
     rm -f "$fix_prompt" /tmp/invest_fix_errors_${TS_CODE}.json
 }
 
