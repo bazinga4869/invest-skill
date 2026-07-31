@@ -174,23 +174,20 @@ run_expert() {
                 echo ''
                 echo '你有文件读写和命令执行工具。请按以下两步执行：'
                 echo ''
-                echo '【阶段 1 — 分析】读入下方任务书，完成完整分析，写入草稿文件'
-                echo "  /tmp/invest_draft_${TS_CODE}_${expert_id}.md"
-                echo ''
-                echo '【阶段 2 — 自检修正】读取你的草稿，逐项检查：'
-                echo '  (a) 第一行是否是 "---"（YAML frontmatter 开头）？'
-                echo '  (b) frontmatter 是否包含 expert_id, score, verdict, data_date, batch_id？'
-                echo '  (c) 必检项表格每行是否都有 DONE/MISSING + 证据 + 结论？'
-                echo '  (d) 所有数字是否紧跟 [source:] 或 [calc:]？'
-                echo '  (e) 总字符数是否 ≥ 3000？'
-                echo '  发现问题立即修正，修正后将完整最终版输出到 stdout。'
-                echo '  不要输出任何 --- 之外的前导文字、空行或代码块标记。'
+                echo '1. 在你的思考中完成完整分析（不要写草稿到其他文件）'
+                echo '2. 输出到 stdout 前逐项自检：'
+                echo '   (a) 第一行必须是 ---（不是则不输出）'
+                echo '   (b) frontmatter 含 expert_id, score, verdict, data_date, batch_id'
+                echo '   (c) 必检项表格每行 DONE/MISSING + 证据路径 + 结论'
+                echo '   (d) 每个数字紧跟 [source:] 或 [calc:]'
+                echo '   (e) 总字符数 >= 3000'
+                echo '3. 自检通过后直接输出完整分析到 stdout'
+                echo '   （严禁写文件后报告路径，严禁在 --- 前输出任何文字）'
                 echo ''
                 echo '══════ 任务书 ══════'
                 cat "$pf"
             } | timeout "$EXPERT_TIMEOUT" codex exec                 -o "$rf"                 --sandbox danger-full-access                 --add-dir /tmp                 "${model_arg[@]}"                 - > "$lf" 2>&1
-            # 清理草稿
-            rm -f "/tmp/invest_draft_${TS_CODE}_${expert_id}.md"
+
             ;;
         claude)
             # claude CLI: --bare 输出纯文本, -p 接受 stdin（避免 $(cat) 导致 "Argument list too long"）
