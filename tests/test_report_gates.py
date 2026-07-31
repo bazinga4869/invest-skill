@@ -429,13 +429,14 @@ adjudicator:
             }
             archived_data["meta"]["data_hash"] = canonical_data_hash(archived_data)
             provisional_batch = batch_id_from_components(archived_data["meta"])
+            batch_sentinel = "__BATCH_ID_PLACEHOLDER__"
             provisional_prompts = {
                 f"invest_prompt_000001.SZ_{expert}.txt":
-                f"000001.SZ {expert} {provisional_batch}".encode()
+                f"000001.SZ {expert}\nbatch_id: {batch_sentinel}".encode()
                 for expert in MANIFEST_EXPERTS
             }
             archived_data["meta"]["prompt_bundle_hash"] = prompt_bundle_hash(
-                provisional_prompts, provisional_batch,
+                provisional_prompts, batch_sentinel,
             )
             archived_data["meta"]["batch_id"] = batch_id_from_components(archived_data["meta"])
             batch_id = archived_data["meta"]["batch_id"]
@@ -483,7 +484,7 @@ adjudicator:
                     content = report.read_bytes()
                 elif name.startswith("invest_prompt_"):
                     expert = name.removeprefix("invest_prompt_000001.SZ_").removesuffix(".txt")
-                    content = f"000001.SZ {expert} {batch_id}".encode()
+                    content = f"000001.SZ {expert}\nbatch_id: {batch_id}".encode()
                 elif name.startswith("invest_result_"):
                     expert = name.removeprefix("invest_result_000001.SZ_").removesuffix(".md")
                     content = expert_texts[expert].encode()
