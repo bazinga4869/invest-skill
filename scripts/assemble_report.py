@@ -240,12 +240,15 @@ def compute_score(results: dict, scoring: dict) -> tuple:
         raw += contrib
         details.append(f"{expert_id}: {s} × {weight} = {contrib:.2f}")
 
-    cognitive_verdict = scores.get("cognitive-controller", {}).get("verdict", "PASS")
-    adjustment = 1.0
-    if cognitive_verdict == "VETO":
-        adjustment = scoring["cognitive_adjustment"]["VETO"]
-    elif cognitive_verdict == "WARN":
-        adjustment = scoring["cognitive_adjustment"]["WARN"]
+    cognitive = scores.get("cognitive-controller", {})
+    # 优先读取专家输出的分级乘数（0.70-1.00），不存在时回退到 verdict 二元映射
+    cognitive_multiplier = cognitive.get("cognitive_multiplier")
+    if isinstance(cognitive_multiplier, (int, float)) and 0.5 <= cognitive_multiplier <= 1.0:
+        adjustment = float(cognitive_multiplier)
+    else:
+        cognitive_verdict = cognitive.get("verdict", "PASS")
+        mapping = scoring.get("cognitive_adjustment", {})
+        adjustment = mapping.get(cognitive_verdict, 1.0)
 
     adjusted = raw * adjustment
     return raw, adjusted, scores, details, adjustment, True
@@ -1277,6 +1280,30 @@ def main() -> int:
         print(f"认知修正后: {adjusted:.2f}")
     else:
         print("综合分: N/A（专家结果不完整）")
+    
+    # 跨批次评分校准
+    try:
+        calib_cmd = [
+            sys.executable, str(SKILL_ROOT / "scripts" / "calibrate_scores.py"),
+            ts_code, "--json",
+        ]
+        calib_result = subprocess.run(
+            calib_cmd, capture_output=True, text=True, timeout=30,
+            cwd=str(SKILL_ROOT),
+        )
+        if calib_result.returncode == 0:
+            calib = json.loads(calib_result.stdout)
+            for expert_id, info in calib.get("experts", {}).items():
+                z = info.get("z_score")
+                if z is not None and abs(z) > 1.5:
+                    print(
+                        f"⚠ 评分校准 — {expert_id}: z={z:+.2f} "
+                        f"(历史 μ={info.get('mean', 0):.0f} σ={info.get('std', 0):.0f} n={info.get('n', 0)})",
+                        file=sys.stderr,
+                    )
+    except Exception:
+        pass
+
     print("下一步：裁判长完善草稿（裁决理由、一行总评、知识索引）后定稿：")
     print(f"  python3 scripts/assemble_report.py {ts_code} --name {name} --finalize")
     return 0 if complete and not validation_errors else 2
