@@ -159,16 +159,35 @@ run_expert() {
     # 根据 EXPERT_CLI 选择后端
     case "$EXPERT_CLI" in
         codex)
-            # codex exec headless 模式对 prompt 末尾格式约束遵循度差。
-            # 将格式契约前置到 prompt 开头，确保第一 token 就按 YAML frontmatter 输出。
+            # 模拟交互式质量的 headless 执行：
+            # - 给予完整文件系统访问权（读 prompt、写草稿、自检）
+            # - 使用与交互模式一致的模型
+            # - 两阶段：分析 → 自检修正 → 最终输出
+            local model="${EXPERT_MODEL:-}"
+            local model_arg=()
+            [[ -n "$model" ]] && model_arg=(-m "$model")
             {
-                echo '你是 invest-skill 分析管线的自动化专家代理。只输出 YAML frontmatter + Markdown 正文。'
-                echo '第一个输出字符必须是 "---"（三个短横线），不得在前后添加任何说明文字、'
-                echo '感叹、确认、或对文件系统的描述。如果文件系统只读，只需忽略并输出分析。'
-                echo '输出完 --- 结束 frontmatter 后继续写正文，不需要额外标记。'
+                echo '⬛⬛⬛ 你是 invest-skill 分析管线的自动化专家代理 ⬛⬛⬛'
                 echo ''
+                echo '你有文件读写和命令执行工具。请按以下两步执行：'
+                echo ''
+                echo '【阶段 1 — 分析】读入下方任务书，完成完整分析，写入草稿文件'
+                echo "  /tmp/invest_draft_${TS_CODE}_${expert_id}.md"
+                echo ''
+                echo '【阶段 2 — 自检修正】读取你的草稿，逐项检查：'
+                echo '  (a) 第一行是否是 "---"（YAML frontmatter 开头）？'
+                echo '  (b) frontmatter 是否包含 expert_id, score, verdict, data_date, batch_id？'
+                echo '  (c) 必检项表格每行是否都有 DONE/MISSING + 证据 + 结论？'
+                echo '  (d) 所有数字是否紧跟 [source:] 或 [calc:]？'
+                echo '  (e) 总字符数是否 ≥ 3000？'
+                echo '  发现问题立即修正，修正后将完整最终版输出到 stdout。'
+                echo '  不要输出任何 --- 之外的前导文字、空行或代码块标记。'
+                echo ''
+                echo '══════ 任务书 ══════'
                 cat "$pf"
-            } | timeout "$EXPERT_TIMEOUT" codex exec -o "$rf" - > "$lf" 2>&1
+            } | timeout "$EXPERT_TIMEOUT" codex exec                 -o "$rf"                 --sandbox danger-full-access                 --add-dir /tmp                 "${model_arg[@]}"                 - > "$lf" 2>&1
+            # 清理草稿
+            rm -f "/tmp/invest_draft_${TS_CODE}_${expert_id}.md"
             ;;
         claude)
             # claude CLI: --bare 输出纯文本, -p 接受 stdin（避免 $(cat) 导致 "Argument list too long"）
