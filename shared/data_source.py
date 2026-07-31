@@ -890,21 +890,22 @@ class AKShareDataSource(DataSource):
         from datetime import datetime
 
         # 获取 orgId
-        org_id = None
+        # 巨潮 orgId 规则：gs + 交易所代码(sh/sz) + 股票代码补零到7位
+        # 例：平安银行 gssz0000001(000001)、福耀玻璃 gssh0060060(600660)
+        # 注意：sse_stock.json 接口已失效(404)，直接按规则构造，无需请求列表API
+        padded_symbol = symbol.zfill(7)
+        org_id = f"gs{exchange}{padded_symbol}"
         try:
             stock_json_url = f"http://www.cninfo.com.cn/new/data/{column}_stock.json"
-            r = requests.get(stock_json_url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
-            stock_list = r.json().get("stockList", [])
-            for item in stock_list:
-                if item.get("code") == symbol:
-                    org_id = item.get("orgId")
-                    break
+            r = requests.get(stock_json_url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code == 200:
+                stock_list = r.json().get("stockList", [])
+                for item in stock_list:
+                    if item.get("code") == symbol:
+                        org_id = item.get("orgId") or org_id
+                        break
         except Exception as e:
-            logger.warning(f"AKShare 获取 orgId 失败 {ts_code}: {e}")
-
-        if not org_id:
-            # 回退：按常见规则构造 orgId
-            org_id = f"gs{exchange}{symbol}"
+            logger.warning(f"AKShare 获取 orgId 失败 {ts_code}: {e}，使用规则构造 {org_id}")
 
         stock_item = f"{symbol},{org_id}"
         start = f"{report_year}-01-01"

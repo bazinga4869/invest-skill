@@ -121,8 +121,16 @@ run_expert() {
     # 根据 EXPERT_CLI 选择后端
     case "$EXPERT_CLI" in
         codex)
-            # codex exec: stdin 读 prompt, -o 落盘结果, stdout/stderr 进日志
-            timeout "$EXPERT_TIMEOUT" codex exec -o "$rf" - < "$pf" > "$lf" 2>&1
+            # codex exec headless 模式对 prompt 末尾格式约束遵循度差。
+            # 将格式契约前置到 prompt 开头，确保第一 token 就按 YAML frontmatter 输出。
+            {
+                echo '你是 invest-skill 分析管线的自动化专家代理。只输出 YAML frontmatter + Markdown 正文。'
+                echo '第一个输出字符必须是 "---"（三个短横线），不得在前后添加任何说明文字、'
+                echo '感叹、确认、或对文件系统的描述。如果文件系统只读，只需忽略并输出分析。'
+                echo '输出完 --- 结束 frontmatter 后继续写正文，不需要额外标记。'
+                echo ''
+                cat "$pf"
+            } | timeout "$EXPERT_TIMEOUT" codex exec -o "$rf" - > "$lf" 2>&1
             ;;
         claude)
             # claude CLI: --bare 输出纯文本, -p 接受 stdin（避免 $(cat) 导致 "Argument list too long"）

@@ -492,7 +492,13 @@ def build_expert_prompt(expert_id: str, filename: str, ts_code: str, name: str,
 **关键原则**：低增长但高 ROIC + 高份额的公司（如成熟消费品龙头）应该得分 65-80，不应因为「增长率低」给 30-50 分。只有增长质量确实差（ROIC 持续低于 WACC、增长靠并购买来的、份额在下滑）才给低分。
 """
 
-    return f"""你是 invest-skill 专家团成员。
+    return f"""⬛⬛⬛ 输出契约（最高优先级）⬛⬛⬛
+你的输出必须第一个字符就是 "-"（即 "---" YAML frontmatter 的开头）。
+严禁在 --- 之前输出任何文字、空行、代码块标记（```）或说明——连"好的""以下是分析"都不行。
+输出必须严格以 --- 开始，以正文末尾结束。完成后 pipe 关闭即可，不需要额外确认。
+⬛⬛⬛
+
+你是 invest-skill 专家团成员。
 
 ## 你的方法论（来自 invest-wiki）
 
