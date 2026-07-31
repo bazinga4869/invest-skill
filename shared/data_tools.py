@@ -47,6 +47,14 @@ import yaml
 from shared.data_source import create_data_source
 from shared.contracts import normalize_ts_code
 
+# MarkItDown: 可选依赖，本地 PDF → 结构化 Markdown 转换
+try:
+    from markitdown import MarkItDown as _MarkItDown
+    _HAS_MARKITDOWN = True
+except ImportError:
+    _HAS_MARKITDOWN = False
+    _MarkItDown = None
+
 CONFIG_PATH = SKILL_ROOT / "config.yaml"
 DB_PATH = SKILL_ROOT / "data" / "invest_skill.db"
 
@@ -1142,9 +1150,85 @@ def cmd_all(ts_code: str) -> dict:
     return data
 
 
-def cmd_annual_report(ts_code: str, years: int = 5, force: bool = False) -> dict:
+def _find_local_annual_pdfs(ts_code: str, years: list[int]) -> dict[int, str]:
+    """在 ~/企业年报/{ts_code}/ 下查找匹配年份的 PDF 年报。"""
+    import os as _os
+    base = Path.home() / "企业年报" / ts_code
+    if not base.is_dir():
+        return {}
+    found = {}
+    for y in years:
+        for fname in _os.listdir(str(base)):
+            if fname.endswith(".pdf") and str(y) in fname and "年报" in fname:
+                found[y] = str(base / fname)
+                break
+    return found
+
+
+def _convert_pdf_with_markitdown(pdf_path: str) -> str:
+    """用 MarkItDown 将 PDF 转换为结构化 Markdown。"""
+    if not _HAS_MARKITDOWN:
+        raise RuntimeError("markitdown 未安装（pip install markitdown[all]）")
+    md = _MarkItDown()
+    result = md.convert(pdf_path)
+    return result.text_content
+
+
+def _split_markitdown_output(markdown_text: str, report_year: str) -> dict[str, dict[str, str]]:
+    """将 MarkItDown 输出的年报全文按章节拆分为 {report_type: {section_name: text}}。
+
+    MarkItDown 将 PDF 转为保留原始文本的 Markdown，但不会生成 # 标题层级。
+    年报的实际章节标记为「第X节 章节名」形式，因此按中文数字章节模式拆分。
+    """
+    import re as _re
+    text = markdown_text
+
+    # 识别年报类型
+    report_type = "annual"
+    if "半年报" in text[:2000] or "半年度报告" in text[:2000]:
+        report_type = "semi_annual"
+    elif "季报" in text[:2000] or "季度报告" in text[:2000]:
+        report_type = "quarterly"
+
+    # 按「第X节 章节名」拆分：以 \n第X节 为界切分
+    parts = _re.split(r'\n(?=第[一二三四五六七八九十百千]+[章节部]\s)', text)
+    sections = {}
+    if len(parts) >= 2:
+        if parts[0].strip():
+            sections["前言及目录"] = parts[0].strip()
+        for part in parts[1:]:
+            header_end = part.find("\n")
+            if header_end < 0:
+                header_end = len(part)
+            header = _re.sub(r'\s+', ' ', part[:header_end].strip())
+            body = part[header_end:].strip() if header_end < len(part) else ""
+            sections[header] = body
+    else:
+        # 无章节标记时，尝试按「目 录」分界：目录前为前言，目录后为正文
+        toc_idx = text.find("目 录") if "目 录" in text else text.find("目录")
+        if toc_idx > 0:
+            sections["重要提示及目录"] = text[:toc_idx].strip()
+            sections["正文"] = text[toc_idx:].strip()
+        else:
+            sections["全文"] = text.strip()
+
+    return {
+        report_type: {
+            "ann_date": "",
+            "title": f"{report_year}年{'年报' if report_type == 'annual' else '半年报' if report_type == 'semi_annual' else '季报'}（MarkItDown）",
+            "source_url": "",
+            "sections": sections,
+        }
+    }
+
+
+def cmd_annual_report(ts_code: str, years: int = 5, force: bool = False,
+                      use_markitdown: bool = True) -> dict:
     """
     抓取最近 N 年的年报/半年报/季报全文，解析后存入 annual_reports 表。
+
+    优先使用本地 PDF + MarkItDown 转换（结构化质量最高），
+    无本地 PDF 时回退到数据源的 text extraction。
     返回结构化 dict，便于 LLM 消费。
     """
     ds = create_data_source(CONFIG)
@@ -1186,15 +1270,28 @@ def cmd_annual_report(ts_code: str, years: int = 5, force: bool = False) -> dict
         if not force and len(all_reports) >= 3 and y != end_year:
             break
         try:
-            # 年报正文优先使用本地可审计缓存，缓存不可用时再走远端源。
-            cache_source = getattr(ds, "cache", None)
-            if cache_source is not None:
-                try:
-                    data = cache_source.get_annual_report_text(ts_code, str(y))
-                except Exception:
+            data = None
+            # MarkItDown 优先级最高：本地 PDF → 结构化 Markdown
+            if use_markitdown and _HAS_MARKITDOWN:
+                local_pdfs = _find_local_annual_pdfs(ts_code, [y])
+                if y in local_pdfs:
+                    try:
+                        logger.info(f"MarkItDown 转换本地 PDF: {local_pdfs[y]}")
+                        md_text = _convert_pdf_with_markitdown(local_pdfs[y])
+                        data = _split_markitdown_output(md_text, str(y))
+                        data["_source"] = "markitdown"
+                    except Exception as exc:
+                        logger.warning(f"MarkItDown 转换失败 {ts_code} {y}: {exc}，回退数据源")
+            # 回退：数据源 text extraction
+            if data is None:
+                cache_source = getattr(ds, "cache", None)
+                if cache_source is not None:
+                    try:
+                        data = cache_source.get_annual_report_text(ts_code, str(y))
+                    except Exception:
+                        data = ds.get_annual_report_text(ts_code, str(y))
+                else:
                     data = ds.get_annual_report_text(ts_code, str(y))
-            else:
-                data = ds.get_annual_report_text(ts_code, str(y))
             if not data or not data.get("reports"):
                 continue
             all_reports[str(y)] = data["reports"]
