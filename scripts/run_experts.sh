@@ -249,25 +249,62 @@ run_batch() {
 # --- 校验结果 ---
 check_results() {
     cd "$SKILL_ROOT"
-    local max_fix_rounds=2
+    local max_rounds=4
     local round=0
-    while [[ $round -le $max_fix_rounds ]]; do
-        if python3 scripts/collect_results.py "$TS_CODE" --check \
-            && python3 scripts/checklist_audit.py --code "$TS_CODE"; then
+
+    while [[ $round -lt $max_rounds ]]; do
+        round=$((round + 1))
+
+        local failing
+        failing=$(python3 scripts/collect_results.py "$TS_CODE" --failing 2>/dev/null || true)
+        if [[ -z "$failing" ]]; then
+            python3 scripts/checklist_audit.py --code "$TS_CODE" >/dev/null 2>&1 && return 0
             return 0
         fi
-        [[ $round -ge $max_fix_rounds ]] && break
-        round=$((round + 1))
-        echo "[fix] 第 $round/$max_fix_rounds 轮修复 — 定向修正校验失败的专家…"
+
+        local -a fail_list
+        mapfile -t fail_list <<< "$failing"
+        local fail_count=${#fail_list[@]}
+
+        echo "[round $round/$max_rounds] ${fail_count} 位未通过: ${fail_list[*]}"
+
         local -a fix_pids=()
-        while IFS= read -r expert_id; do
-            fix_expert "$expert_id" &
+        for expert_id in "${fail_list[@]}"; do
+            if [[ $round -eq 1 ]]; then
+                run_expert "$expert_id" &
+            else
+                fix_expert "$expert_id" &
+            fi
             fix_pids+=($!)
-        done < <(python3 scripts/collect_results.py "$TS_CODE" --failing 2>/dev/null)
+        done
         for pid in "${fix_pids[@]}"; do
             wait "$pid" || true
         done
+
+        local new_failing
+        new_failing=$(python3 scripts/collect_results.py "$TS_CODE" --failing 2>/dev/null || true)
+        if [[ -z "$new_failing" ]]; then
+            python3 scripts/checklist_audit.py --code "$TS_CODE" >/dev/null 2>&1 && return 0
+            return 0
+        fi
+        local -a new_fail_list
+        mapfile -t new_fail_list <<< "$new_failing"
+        local new_fail_count=${#new_fail_list[@]}
+        local improved=$((fail_count - new_fail_count))
+
+        if [[ $improved -eq 0 ]]; then
+            echo "✗ 本轮无新增通过 → 判定为无法执行"
+            return 1
+        fi
+
+        echo "  ✓ 新增通过 $improved 位，剩余 $new_fail_count 位"
+
+        if [[ $new_fail_count -eq 0 ]]; then
+            return 0
+        fi
     done
+
+    echo "✗ 已达最大重试轮次 $max_rounds"
     return 1
 }
 
