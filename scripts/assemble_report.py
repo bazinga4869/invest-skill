@@ -106,7 +106,7 @@ def load_scoring_config() -> dict:
             if (not isinstance(ratings, list) or len(ratings) < 2
                     or any(not isinstance(item, dict)
                            or not isinstance(item.get("min_score"), (int, float))
-                           or item.get("verdict") not in {"BUY", "OBSERVE", "HOLD", "PASS"}
+                           or item.get("verdict") not in {"BUY", "OBSERVE", "HOLD", "PASS", "REDUCE", "AVOID"}
                            or not isinstance(item.get("max_allocation_pct"), (int, float))
                            for item in ratings)
                     or sorted((item["min_score"] for item in ratings), reverse=True)
@@ -114,11 +114,16 @@ def load_scoring_config() -> dict:
                     or ratings[-1]["min_score"] != 0):
                 raise SystemExit("scoring.ratings 非法或未覆盖 0 分")
             veto_rules = cfg.get("veto_rules")
+            valid_verdicts = {item["verdict"] for item in ratings}
             if not isinstance(veto_rules, dict) or any(
                 key not in EXPERTS or not isinstance(value, list) or not value
+                or any(v not in valid_verdicts for v in value)
                 for key, value in veto_rules.items()
             ):
-                raise SystemExit("scoring.veto_rules 非法")
+                raise SystemExit(
+                    f"scoring.veto_rules 非法（键需为专家 ID，"
+                    f"值需为有效评级名 {sorted(valid_verdicts)}）"
+                )
             macro_cap = cfg.get("macro_veto_max_allocation_pct")
             if not isinstance(macro_cap, (int, float)) or not 0 <= macro_cap <= 100:
                 raise SystemExit("scoring.macro_veto_max_allocation_pct 非法")
@@ -844,7 +849,7 @@ def validate_adjudication(draft: str, results: dict | None = None,
     if not isinstance(adjudicator, dict):
         return ["综合裁决 YAML 缺少 adjudicator 映射"]
     problems = []
-    if adjudicator.get("verdict") not in {"HOLD", "PASS", "BUY", "SELL", "OBSERVE"}:
+    if adjudicator.get("verdict") not in {"HOLD", "PASS", "BUY", "SELL", "OBSERVE", "REDUCE", "AVOID"}:
         problems.append("综合裁决 verdict 非法")
     score = adjudicator.get("composite_score")
     if isinstance(score, bool) or not isinstance(score, (int, float)) or not 0 <= score <= 100:
@@ -960,7 +965,7 @@ def validate_adjudication(draft: str, results: dict | None = None,
             problems.append(
                 f"OBSERVE 的仓位上限不得超过 {tier['max_allocation_pct']}%"
             )
-        elif verdict in {"HOLD", "PASS", "SELL"} and allocation != 0:
+        elif verdict in {"HOLD", "PASS", "SELL", "REDUCE", "AVOID"} and allocation != 0:
             problems.append(f"{verdict} 的 max_allocation_pct 必须为 0")
     if results is not None and scoring is not None:
         raw, adjusted, scores, _, adjustment, complete = compute_score(results, scoring)
@@ -1006,7 +1011,7 @@ def validate_adjudication(draft: str, results: dict | None = None,
                     else ({str(tier["verdict"])} if tier else set())
                 )
                 if configured and not allowed_verdicts:
-                    problems.append(f"多个 VETO 规则无共同允许结论: {veto_ids}")
+                    allowed_verdicts = {str(tier["verdict"])} if tier else set()
                 if verdict not in allowed_verdicts:
                     problems.append(
                         f"综合裁决未执行 wiki VETO 规则: {veto_ids} -> {sorted(allowed_verdicts)}"
