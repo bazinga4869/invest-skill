@@ -1,20 +1,13 @@
 #!/usr/bin/env python3
 """
-stock_screener.py — 双管道股票分析调度器
-========================================
-每天选择2家公司，各出2份独立报告。
+[DEPRECATED] stock_screener.py — 已废弃，请勿使用。
 
-使用方式：
-  python3 stock_screener.py                   # 查看下一个待分析的公司
-  python3 stock_screener.py run               # 立即分析下一家
-  python3 stock_screener.py add SH600519     # 手动加入待分析队列
-  python3 stock_screener.py list              # 查看队列状态
+本文件是早期原型，存在以下问题：
+  1. 跨项目引用 ~/ai-berkshire，违反 CLAUDE.md 定义的双管道独立约束
+  2. 依赖 data/analysis_queue.json（已从 repo 删除）
+  3. 无任何其他文件引用，功能已被 scripts/cron_trigger.sh + scripts/pick_stocks.py 替代
 
-双管道：
-  - Source A: invest-skill (Tushare) → report_A.md
-  - Source B: sina_finance.py (新浪) → report_B.md
-  
-队列维护在 data/analysis_queue.json
+如需删除此文件，无任何影响。保留仅供历史参考。
 """
 
 import json

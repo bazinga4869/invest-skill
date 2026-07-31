@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # ============================================================
-# run_experts.sh — 独立 Agent 并行执行 7 位专家分析
+# run_experts.sh — 并行执行 7 位专家分析
 #
 # 用法：
-#   bash scripts/run_experts.sh <ts_code> [--agent auto|codex|claude|hermes]
-#                                         [--no-prepare] [--retry]
+#   bash scripts/run_experts.sh <ts_code> [--no-prepare] [--retry]
 #
 #   --no-prepare  跳过 prompt 生成（调用方已运行 prepare_prompts.py，避免重复取数）
 #   --retry       幂等重试：只重跑校验未通过的专家（collect_results.py --failing）
@@ -15,16 +14,12 @@
 #
 # 退出码：0 = 7 位专家全部通过校验
 #         1 = 存在失败或校验未通过的专家（可用 --retry 幂等重试，最多 1 次）
-#         2 = 用法/环境错误（agent CLI 缺失、prompt 缺失等）
+#         2 = 用法/环境错误（codex CLI 缺失、prompt 缺失等）
 #
-# 设计要点：
-#   - codex 后端用 `codex exec -o <result>` 落盘最后一条消息（CLI 写文件，
-#     不受 codex exec 只读沙箱限制）；stdout/stderr 全部进 per-expert 日志，
-#     保证结果文件只含专家正文，frontmatter 可解析。
-#   - 非 --retry 运行前先删除旧结果文件，防止上次运行的陈旧结果被误当成本次产出。
-#   - hermes 无 stdin 模式（-z 走 argv），prompt 超限直接判失败而非截断。
-#   - 所有等待都收集逐专家退出码；任何失败都会反映到最终退出码（不静默）。
-#   - hermes 后端未做端到端验证，仅作为实验性后备。
+# 设计：
+#   - 每位专家启动一个 codex exec 独立进程，通过 stdin 读 prompt、-o 落盘结果
+#   - 非 --retry 运行前先删除旧结果文件，防止上次运行的陈旧结果被误当成本次产出
+#   - 所有等待都收集逐专家退出码；任何失败都会反映到最终退出码（不静默）
 # ============================================================
 
 set -euo pipefail
@@ -35,32 +30,43 @@ TMP_DIR="${TMPDIR:-/tmp}"
 
 # --- 参数解析 ---
 TS_CODE=""
-AGENT="auto"
 NO_PREPARE=0
 RETRY=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --agent)     AGENT="${2:?--agent 需要参数}"; shift 2 ;;
         --no-prepare) NO_PREPARE=1; shift ;;
-        --retry)     RETRY=1; shift ;;
-        -h|--help)   sed -n '2,20p' "$0"; exit 0 ;;
-        -*)          echo "未知参数: $1" >&2; exit 2 ;;
-        *)           TS_CODE="$1"; shift ;;
+        --retry)      RETRY=1; shift ;;
+        --agent)      EXPERT_CLI="$2"; shift 2 ;;
+        --agent=*)    EXPERT_CLI="${1#*=}"; shift ;;
+        -h|--help)    sed -n '2,17p' "$0"; exit 0 ;;
+        -*)           echo "未知参数: $1" >&2; exit 2 ;;
+        *)            TS_CODE="$1"; shift ;;
     esac
 done
-[[ -n "$TS_CODE" ]] || { echo "用法: $0 <ts_code> [--agent auto|codex|claude|hermes] [--no-prepare] [--retry]" >&2; exit 2; }
+[[ -n "$TS_CODE" ]] || { echo "用法: $0 <ts_code> [--no-prepare] [--retry] [--agent codex|claude]" >&2; exit 2; }
+if ! TS_CODE=$(cd "$SKILL_ROOT" && python3 -c \
+    'import sys; from shared.contracts import normalize_ts_code; print(normalize_ts_code(sys.argv[1]))' \
+    "$TS_CODE"); then
+    echo "ERROR: 股票代码格式非法" >&2
+    exit 2
+fi
 
-# 专家列表（与 SKILL.md 一致）
-EXPERTS=(
-    "financial-auditor:01-财务排雷官"
-    "value-valuator:02-价值估值师"
-    "growth-assessor:03-成长质量师"
-    "moat-analyst:04-护城河分析师"
-    "cognitive-controller:05-认知风控官"
-    "macro-cyclist:06-宏观周期师"
-    "management-auditor:07-管理层审计师"
-)
+# 前置检查：所选 CLI 必须可用（--agent 参数 或 EXPERT_CLI 环境变量）
+EXPERT_CLI="${EXPERT_CLI:-codex}"
+command -v "$EXPERT_CLI" &>/dev/null || { echo "ERROR: 需要 $EXPERT_CLI CLI 来执行专家分析（可通过 --agent 参数或 EXPERT_CLI 环境变量指定）" >&2; exit 2; }
+
+# 专家列表：从 data/experts.json 读取（唯一数据源）
+EXPERTS_JSON="$SKILL_ROOT/data/experts.json"
+EXPERTS=()
+while IFS= read -r entry; do
+    EXPERTS+=("$entry")
+done < <(python3 -c "
+import json
+data = json.load(open('$EXPERTS_JSON'))
+for e in data['experts']:
+    print(f\"{e['id']}:{e['file']}\")
+")
 
 CONCURRENCY="${RUN_EXPERTS_CONCURRENCY:-3}"
 EXPERT_TIMEOUT="${EXPERT_TIMEOUT:-1800}"
@@ -73,25 +79,6 @@ trap 'echo "⚠ 收到中断信号，终止后台专家进程…" >&2; kill $(jo
 prompt_file() { echo "$TMP_DIR/invest_prompt_${TS_CODE}_$1.txt"; }
 result_file() { echo "$TMP_DIR/invest_result_${TS_CODE}_$1.md"; }
 expert_log()  { echo "$LOG_DIR/${TS_CODE}_$1.log"; }
-
-# --- Agent 检测 ---
-detect_agent() {
-    if [[ "$AGENT" != "auto" ]]; then
-        command -v "$AGENT" &>/dev/null || { echo "ERROR: 指定的 agent 不可用: $AGENT" >&2; return 2; }
-        echo "$AGENT"
-        return 0
-    fi
-    if command -v codex &>/dev/null; then
-        echo "codex"
-    elif command -v claude &>/dev/null; then
-        echo "claude"
-    elif command -v hermes &>/dev/null; then
-        echo "hermes"
-    else
-        echo "ERROR: 未检测到 codex/claude/hermes CLI，缺少 agent 后端无法执行本分析" >&2
-        return 2
-    fi
-}
 
 # --- 生成 prompt 文件 ---
 generate_prompts() {
@@ -116,10 +103,9 @@ require_prompts() {
     fi
 }
 
-# --- 执行单个专家（后台运行；退出码即 case 中命令的退出码） ---
+# --- 执行单个专家（后台运行） ---
 run_expert() {
     local expert_id="$1"
-    local backend="$2"
     local pf rf lf
     pf="$(prompt_file "$expert_id")"
     rf="$(result_file "$expert_id")"
@@ -132,27 +118,18 @@ run_expert() {
         return 2
     fi
 
-    case "$backend" in
+    # 根据 EXPERT_CLI 选择后端
+    case "$EXPERT_CLI" in
         codex)
-            # -o：CLI 落盘最后一条消息（不受只读沙箱限制）；stdout/stderr 进日志
+            # codex exec: stdin 读 prompt, -o 落盘结果, stdout/stderr 进日志
             timeout "$EXPERT_TIMEOUT" codex exec -o "$rf" - < "$pf" > "$lf" 2>&1
             ;;
         claude)
-            # --bare: 纯文本输出；stdin 传入避免 prompt 中 ** 被误解析
-            timeout "$EXPERT_TIMEOUT" claude --bare -p < "$pf" > "$rf" 2> "$lf"
-            ;;
-        hermes)
-            # hermes 无 stdin 模式，-z 走 argv；超限判失败而非截断半截 prompt
-            local size
-            size=$(wc -c < "$pf")
-            if (( size > 300000 )); then
-                echo "prompt ${size}B 超出 hermes argv 安全上限（300KB），请改用 codex/claude 后端" > "$lf"
-                return 1
-            fi
-            timeout "$EXPERT_TIMEOUT" hermes -z "$(cat "$pf")" > "$rf" 2> "$lf"
+            # claude CLI: --bare 输出纯文本, -p 接受 stdin（避免 $(cat) 导致 "Argument list too long"）
+            timeout "$EXPERT_TIMEOUT" claude --bare -p < "$pf" > "$rf" 2>"$lf"
             ;;
         *)
-            echo "未知后端: $backend" > "$lf"
+            echo "不支持的 EXPERT_CLI: $EXPERT_CLI（支持 codex / claude）" > "$lf"
             return 2
             ;;
     esac
@@ -182,14 +159,13 @@ wait_batch() {
 }
 
 run_batch() {
-    local backend="$1"; shift
     local -a pids=()
     local -A pid2expert=()
     local count=0
     local expert_id pid
 
     for expert_id in "$@"; do
-        run_expert "$expert_id" "$backend" &
+        run_expert "$expert_id" &
         pid=$!
         pids+=("$pid")
         pid2expert["$pid"]="$expert_id"
@@ -208,7 +184,8 @@ run_batch() {
 # --- 校验结果 ---
 check_results() {
     cd "$SKILL_ROOT"
-    if python3 scripts/collect_results.py "$TS_CODE" --check; then
+    if python3 scripts/collect_results.py "$TS_CODE" --check \
+        && python3 scripts/checklist_audit.py --code "$TS_CODE"; then
         return 0
     fi
     return 1
@@ -216,9 +193,6 @@ check_results() {
 
 # --- 主流程 ---
 main() {
-    local backend
-    backend=$(detect_agent) || exit 2
-
     # --retry 隐含 --no-prepare：结果必须与现有 prompt 同批次（data_date 一致性校验依赖这一点）
     if [[ $RETRY -eq 1 ]]; then
         NO_PREPARE=1
@@ -226,7 +200,7 @@ main() {
 
     echo "══════════════════════════════════════════"
     echo "  invest-skill 专家团独立分析"
-    echo "  标的：$TS_CODE | Agent 后端：$backend | 并发：$CONCURRENCY | 单专家超时：${EXPERT_TIMEOUT}s"
+    echo "  标的：$TS_CODE | 并发：$CONCURRENCY | 单专家超时：${EXPERT_TIMEOUT}s"
     echo "══════════════════════════════════════════"
 
     if [[ $NO_PREPARE -eq 0 ]]; then
@@ -256,21 +230,20 @@ main() {
         echo "[2/3] 并行执行 ${#targets[@]} 位专家…"
     fi
 
-    run_batch "$backend" "${targets[@]}"
+    run_batch "${targets[@]}"
 
     echo "[3/3] 校验结果…"
     if check_results; then
         echo ""
         echo "✓ 全部完成。下一步："
-        echo "  python3 scripts/assemble_report.py $TS_CODE --name <公司名>"
+        echo "  bash scripts/run_challenges.sh $TS_CODE"
         exit 0
     fi
 
     echo ""
     echo "✗ 存在未通过校验的专家。修复策略（有界，禁止反复重跑）："
-    echo "  1. 幂等重试一次： bash scripts/run_experts.sh $TS_CODE --agent $backend --retry"
-    echo "  2. 重试仍失败 → 以缺失状态继续：裁判长在报告中显式标注缺失专家并降低置信度，"
-    echo "     或使用 fallback 路径（SKILL.md 第五步）。"
+    echo "  1. 幂等重试一次： bash scripts/run_experts.sh $TS_CODE --retry"
+    echo "  2. 重试仍失败 → 终止本次分析；禁止以缺失专家结果发布报告。"
     exit 1
 }
 

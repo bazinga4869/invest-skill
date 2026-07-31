@@ -3,7 +3,7 @@
 # daily_analysis.sh — 每日自动分析 N 家上市公司
 #
 # 用法：
-#   bash scripts/daily_analysis.sh              # 正常执行：取 3 只，全流程
+#   bash scripts/daily_analysis.sh              # 取 3 只，执行到待裁决草稿
 #   bash scripts/daily_analysis.sh --count 5    # 取 5 只
 #   bash scripts/daily_analysis.sh --sync-only  # 只同步数据 + 生成 prompt，不跑 expert
 #   bash scripts/daily_analysis.sh --dry-run    # 只打印要分析的股票，不执行
@@ -29,7 +29,7 @@ MODE="full"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --count) COUNT="$2"; shift 2 ;;
-                --sync-only) MODE="sync-only"; shift ;;
+        --sync-only) MODE="sync-only"; shift ;;
         --dry-run) MODE="dry-run"; shift ;;
         --help|-h)
             echo "用法: $0 [--count N] [--resume|--sync-only|--dry-run]"
@@ -57,24 +57,24 @@ pick_stocks() {
 analyze_one() {
     local code="$1"
     local name="$2"
-    local result_file="$SKILL_ROOT/reports/invest_tool/${code}.md"
+    local result_file="$SKILL_ROOT/reports/invest_tool/${code}.draft.md"
 
     log "  ┌─ $code $name ─────────────────"
 
     # Step 1: 数据同步
-    log "  │ [1/4] 同步数据…"
+    log "  │ [1/5] 同步数据…"
     if ! python3 "$SKILL_ROOT/shared/data_tools.py" sync "$code" >> "$LOG_FILE" 2>&1; then
         log "  │ ✗ 数据同步失败"
-    log_activity "sync" "$code" "$name" "failure" "数据同步失败"
+        log_activity "sync" "$code" "$name" "failure" "数据同步失败"
         return 1
-    log_activity "sync" "$code" "$name" "success" "数据同步完成"
     fi
+    log_activity "sync" "$code" "$name" "success" "数据同步完成"
 
     # Step 2: 生成 prompt
-    log "  │ [2/4] 生成专家 prompt…"
+    log "  │ [2/5] 生成专家 prompt…"
     if ! python3 "$SKILL_ROOT/scripts/prepare_prompts.py" "$code" >> "$LOG_FILE" 2>&1; then
         log "  │ ✗ prompt 生成失败"
-    log_activity "prompt" "$code" "$name" "failure" "prompt生成失败"
+        log_activity "prompt" "$code" "$name" "failure" "prompt生成失败"
         return 1
     fi
 
@@ -84,8 +84,8 @@ analyze_one() {
     fi
 
     # Step 3: 执行专家分析（timeout 60 分钟）
-    log "  │ [3/4] 执行 7 位专家…"
-    if timeout 3600 bash "$SKILL_ROOT/scripts/run_experts.sh" "$code" >> "$LOG_FILE" 2>&1; then
+    log "  │ [3/5] 执行 7 位专家…"
+    if timeout 3600 bash "$SKILL_ROOT/scripts/run_experts.sh" "$code" --no-prepare >> "$LOG_FILE" 2>&1; then
         log "  │ ✓ 专家分析完成"
         log_activity "expert" "$code" "$name" "success" "7专家分析完成"
     else
@@ -98,14 +98,25 @@ analyze_one() {
         return 1
     fi
 
-    # Step 4: 组装报告
-    log "  │ [4/4] 组装报告…"
-    if python3 "$SKILL_ROOT/scripts/assemble_report.py" "$code" --name "$name" --finalize >> "$LOG_FILE" 2>&1; then
-        log "  └─ ✓ $code $name — 报告已生成: $result_file"
-        log_activity "report" "$code" "$name" "success" "报告已生成"
+    # Step 4: 独立执行二级魔鬼代言人质询。
+    log "  │ [4/5] 执行 7 份二级质询…"
+    if timeout 3600 bash "$SKILL_ROOT/scripts/run_challenges.sh" "$code" >> "$LOG_FILE" 2>&1; then
+        log "  │ ✓ 二级质询完成"
+        log_activity "challenge" "$code" "$name" "success" "7份质询完成"
+    else
+        local ec=$?
+        log "  │ ✗ 二级质询失败 (exit=$ec)"
+        return 1
+    fi
+
+    # Step 5: 生成待裁决草稿。shell 不能替代裁判长认知工作，禁止直接定稿。
+    log "  │ [5/5] 生成待裁决草稿…"
+    if python3 "$SKILL_ROOT/scripts/assemble_report.py" "$code" --name "$name" >> "$LOG_FILE" 2>&1; then
+        log "  └─ ✓ $code $name — 专家结果已组装，待裁判长裁决: $result_file"
+        log_activity "report" "$code" "$name" "skipped" "草稿已生成，待裁判长裁决和发布门禁"
         return 0
     else
-        log "  └─ ⚠ $code $name — 报告组装失败（专家结果可能不完整）"
+        log "  └─ ✗ $code $name — 草稿组装失败（专家结果未通过门禁）"
         return 1
     fi
 }
@@ -134,9 +145,9 @@ main() {
         local code="${line%% *}"
         local name="${line#* }"
         if analyze_one "$code" "$name"; then
-            ((ok++))
+            ok=$((ok + 1))
         else
-            ((fail++))
+            fail=$((fail + 1))
         fi
         echo ""
     done <<< "$stocks"
@@ -168,6 +179,7 @@ main() {
     log "  完成：$ok | 失败：$fail"
     log "  摘要：$SUMMARY_FILE"
     log "══════════════════════════════════════════"
+    [[ $fail -eq 0 ]]
 }
 
 main

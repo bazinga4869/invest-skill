@@ -6,7 +6,7 @@
 
 Hermes 不直接执行 7 专家分析（那是 LLM agent 的工作）。Hermes 负责：
 - 数据管道：`python3 shared/data_tools.py sync-all-stocks`（cron）
-- 定时触发：cron 调度 `daily_analysis.py`
+- 定时触发：cron 调度 `scripts/cron_trigger.sh`
 - Git push + 坚果云同步
 
 Hermes 如需触发完整分析流程，应调用 Codex 或 Claude Code 执行 SKILL.md。

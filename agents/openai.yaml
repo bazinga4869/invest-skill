@@ -1,0 +1,4 @@
+interface:
+  display_name: "Invest Skill"
+  short_description: "A股公司深度投资分析：7+1专家团并行评估与报告生成"
+  default_prompt: "Use $invest-skill to analyze a Chinese A-share stock, e.g. 贵州茅台 (600519.SH)."

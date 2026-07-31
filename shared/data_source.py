@@ -14,13 +14,13 @@ import time
 import logging
 import re
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import pandas as pd
 import numpy as np
 
-logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
+logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s', stream=sys.stderr)
 logger = logging.getLogger(__name__)
 
 
@@ -40,8 +40,13 @@ def code_to_exchange(ts_code: str) -> str:
 
 def normalize_date(d) -> str:
     """把各种日期格式统一为 YYYYMMDD"""
-    if d is None or (isinstance(d, float) and np.isnan(d)):
+    if d is None:
         return ""
+    try:
+        if pd.isna(d):
+            return ""
+    except (TypeError, ValueError):
+        pass
     if isinstance(d, pd.Timestamp):
         return d.strftime("%Y%m%d")
     if isinstance(d, datetime):
@@ -58,6 +63,15 @@ def normalize_date_hyphen(d) -> str:
     if len(s) == 8:
         return f"{s[:4]}-{s[4:6]}-{s[6:]}"
     return str(d)
+
+
+def yuan_to_wan(value) -> Optional[float]:
+    """AKShare spot 市值（元）→ 内部 daily_basic 契约（万元）。"""
+    try:
+        parsed = float(str(value).replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+    return parsed / 10000 if np.isfinite(parsed) else None
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +150,11 @@ class DataSource(ABC):
             "full_text": "..."
         }
         """
+
+    @abstractmethod
+    def get_macro_data(self) -> dict:
+        """获取宏观关键指标（GDP/PMI/CPI/PPI/M1-M2/利率），返回结构化 dict。
+        每个指标独立容错——单个失败不阻塞其余。"""
         pass
 
 
@@ -209,8 +228,17 @@ class TushareDataSource(DataSource):
 
     def get_cashflow(self, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         fields = ("ts_code,ann_date,f_ann_date,end_date,report_type,c_cash_equ_end_period,n_cashflow_act,"
-                  "n_cashflow_inv_act,n_cash_flows_fnc_act,free_cash_flow")
-        return self._safe_call(self.pro.cashflow, ts_code=ts_code, start_date=start_date, end_date=end_date, fields=fields)
+                  "n_cashflow_inv_act,n_cash_flows_fnc_act,c_pay_acq_const_fiolta,free_cashflow")
+        df = self._safe_call(
+            self.pro.cashflow,
+            ts_code=ts_code,
+            start_date=start_date,
+            end_date=end_date,
+            report_type="1",
+            fields=fields,
+        )
+        # Tushare 的字段名是 free_cashflow；数据库历史字段沿用 free_cash_flow。
+        return df.rename(columns={"free_cashflow": "free_cash_flow"})
 
     def get_fina_indicator(self, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         fields = ("ts_code,ann_date,end_date,roe,roe_waa,roe_dt,roic,grossprofit_margin,netprofit_margin,"
@@ -223,6 +251,141 @@ class TushareDataSource(DataSource):
 
     def get_forecast(self, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         return self._safe_call(self.pro.forecast, ts_code=ts_code, start_date=start_date, end_date=end_date)
+
+    def get_macro_data(self) -> dict:
+        """通过 Tushare 拉取宏观关键指标。
+
+        拉取 5 类指标（各行独立容错）:
+        1. GDP 增速（cn_gdp）
+        2. PMI 制造业/非制造业（cn_pmi）
+        3. CPI / PPI（cn_cpi / cn_ppi）
+        4. M1/M2 增速及剪刀差（cn_m）
+        5. SHIBOR 隔夜（shibor）
+
+        返回 dict，缺失指标记录在 errors 列表中，不抛异常。
+        """
+        from datetime import datetime as _dt
+        today = _dt.now()
+        start_month = (today - timedelta(days=395)).strftime("%Y%m")
+        end_month = today.strftime("%Y%m")
+        start_quarter = f"{today.year - 3}Q1"
+        end_quarter = f"{today.year}Q4"
+        result = {
+            "update_date": _dt.now().strftime("%Y-%m-%d"),
+            "source": "tushare",
+            "indicators": {},
+            "errors": [],
+        }
+
+        def _safe(key, fn):
+            try:
+                val = fn()
+                if val is not None:
+                    result["indicators"][key] = val
+            except Exception as e:
+                result["errors"].append(f"{key}: {e}")
+
+        # 1. GDP — 最近 3 个季度
+        def _gdp():
+            df = self._safe_call(self.pro.cn_gdp, start_q=start_quarter, end_q=end_quarter,
+                                 fields="quarter,gdp,gdp_yoy")
+            if df.empty:
+                return None
+            df = df.sort_values("quarter", ascending=False)
+            series = []
+            for _, r in df.iterrows():
+                # cn_gdp 返回单位为亿元，/ 10000 转为万亿
+                gdp_yi = float(r["gdp"]) / 10000 if r.get("gdp") else None
+                gdp_yi = round(gdp_yi, 2) if gdp_yi is not None else None
+                yoy = float(r["gdp_yoy"]) if r.get("gdp_yoy") else None
+                series.append({"quarter": str(r["quarter"]), "gdp_yi": gdp_yi, "yoy_pct": yoy})
+            return {"latest": series[0] if series else {}, "series": series}
+
+        # 2. PMI — 最近 6 个月
+        def _pmi():
+            # cn_pmi 不支持 fields 过滤，返回全量列（数据量小，可接受）
+            df = self._safe_call(self.pro.cn_pmi, start_m=start_month, end_m=end_month)
+            if df.empty:
+                return None
+            df = df.sort_values("MONTH", ascending=False)
+            mfg = {"latest": None, "trend": []}
+            svc = {"latest": None, "trend": []}
+            for _, r in df.iterrows():
+                m = str(r.get("MONTH", r.get("month", "")))
+                mv = float(r["PMI010000"]) if r.get("PMI010000") else None
+                sv = float(r["PMI020100"]) if r.get("PMI020100") else None
+                if mfg["latest"] is None:
+                    mfg["latest"] = {"month": m, "value": mv}
+                mfg["trend"].append({"month": m, "value": mv})
+                if svc["latest"] is None:
+                    svc["latest"] = {"month": m, "value": sv}
+                svc["trend"].append({"month": m, "value": sv})
+            return {"manufacturing": mfg, "non_manufacturing": svc}
+
+        # 3. CPI & PPI — 最近 6 个月
+        def _cpi_ppi():
+            df_cpi = self._safe_call(self.pro.cn_cpi, start_m=start_month, end_m=end_month,
+                                     fields="month,nt_yoy")
+            df_ppi = self._safe_call(self.pro.cn_ppi, start_m=start_month, end_m=end_month,
+                                     fields="month,ppi_yoy")
+            output = {}
+            for out_key, colname in [("cpi", "nt_yoy"), ("ppi", "ppi_yoy")]:
+                df = df_cpi if out_key == "cpi" else df_ppi
+                if df.empty:
+                    continue
+                df = df.sort_values("month", ascending=False)
+                series, latest_val = [], None
+                for _, r in df.iterrows():
+                    v = float(r[colname]) if r.get(colname) else None
+                    if latest_val is None:
+                        latest_val = v
+                    series.append({"month": str(r["month"]), "yoy_pct": v})
+                latest_month = str(df.iloc[0]["month"]) if not df.empty else None
+                output[out_key] = {"latest": {"month": latest_month, "yoy_pct": latest_val},
+                                   "series": series}
+            return output if output else None
+
+        # 4. M1/M2 — 最近 6 个月
+        def _money():
+            df = self._safe_call(self.pro.cn_m, start_m=start_month, end_m=end_month,
+                                 fields="month,m1_yoy,m2_yoy")
+            if df.empty:
+                return None
+            df = df.sort_values("month", ascending=False)
+            first = df.iloc[0]
+            m1 = float(first["m1_yoy"]) if first.get("m1_yoy") else None
+            m2 = float(first["m2_yoy"]) if first.get("m2_yoy") else None
+            scissors = round(m1 - m2, 2) if m1 is not None and m2 is not None else None
+            series = []
+            for _, r in df.iterrows():
+                v1 = float(r["m1_yoy"]) if r.get("m1_yoy") else None
+                v2 = float(r["m2_yoy"]) if r.get("m2_yoy") else None
+                s = round(v1 - v2, 2) if v1 is not None and v2 is not None else None
+                series.append({"month": str(r["month"]), "m1_yoy_pct": v1,
+                               "m2_yoy_pct": v2, "scissors_pct": s})
+            return {"latest_scissors_pct": scissors, "series": series}
+
+        # 5. SHIBOR 隔夜 — 最近一日
+        def _shibor():
+            df = self._safe_call(
+                self.pro.shibor,
+                start_date=(today - timedelta(days=10)).strftime("%Y%m%d"),
+                end_date=today.strftime("%Y%m%d"),
+            )
+            if df.empty:
+                return None
+            df = df.sort_values("date", ascending=False)
+            r = df.iloc[0]
+            on_val = float(r["on"]) if r.get("on") else None
+            w1_val = float(r["1w"]) if r.get("1w") else None
+            return {"date": str(r.get("date", "")), "overnight_pct": on_val,
+                    "week_pct": w1_val}
+
+        for key, fn in [("gdp", _gdp), ("pmi", _pmi), ("inflation", _cpi_ppi),
+                         ("money_supply", _money), ("shibor", _shibor)]:
+            _safe(key, fn)
+
+        return result
 
     def get_annual_report_text(self, ts_code: str, report_year: str) -> dict:
         """Tushare 暂不直接提供年报全文，抛出异常让 fallback 到 AKShare 处理。"""
@@ -270,6 +433,20 @@ class AKShareDataSource(DataSource):
                 "area": ""
             }])
 
+        # stock_individual_info_em 返回 key-value 形式。
+        info = dict(zip(df["item"].astype(str), df["value"]))
+        return pd.DataFrame([{
+            "ts_code": ts_code,
+            "symbol": symbol,
+            "name": info.get("股票简称", ""),
+            "fullname": info.get("公司名称", ""),
+            "exchange": code_to_exchange(ts_code),
+            "list_date": normalize_date(info.get("上市时间", "")),
+            "delist_date": "",
+            "industry": info.get("行业", ""),
+            "area": info.get("地域", "")
+        }])
+
     def get_all_stocks(self) -> pd.DataFrame:
         """从全市场 spot 获取全部 A 股。"""
         try:
@@ -297,20 +474,6 @@ class AKShareDataSource(DataSource):
                 "area": ""
             })
         return pd.DataFrame(result)
-
-        # stock_individual_info_em 返回 key-value 形式
-        info = dict(zip(df["item"].astype(str), df["value"]))
-        return pd.DataFrame([{
-            "ts_code": ts_code,
-            "symbol": symbol,
-            "name": info.get("股票简称", ""),
-            "fullname": info.get("公司名称", ""),
-            "exchange": code_to_exchange(ts_code),
-            "list_date": info.get("上市时间", ""),
-            "delist_date": "",
-            "industry": info.get("行业", ""),
-            "area": info.get("地域", "")
-        }])
 
     def get_daily_quotes(self, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         symbol = self._symbol(ts_code)
@@ -350,6 +513,14 @@ class AKShareDataSource(DataSource):
     def get_daily_basic(self, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         """从全市场 spot 获取最新估值；AKShare 不便于返回历史日线估值序列，因此只返回最新一天。"""
         symbol = self._symbol(ts_code)
+        today = datetime.now()
+        end_norm = normalize_date(end_date)
+        if end_norm != today.strftime("%Y%m%d"):
+            logger.warning("AKShare spot 不能提供历史时点估值，拒绝用当前值回填历史日期")
+            return pd.DataFrame()
+        if today.weekday() < 5 and today.hour < 16:
+            logger.warning("AKShare spot 尚处交易时段，拒绝把盘中估值伪装成收盘数据")
+            return pd.DataFrame()
         try:
             df = self.ak.stock_zh_a_spot_em()
         except Exception as e:
@@ -361,7 +532,13 @@ class AKShareDataSource(DataSource):
             return pd.DataFrame()
 
         row = df.iloc[0]
-        today = datetime.now().strftime("%Y%m%d")
+        recent_start = (today - timedelta(days=14)).strftime("%Y%m%d")
+        recent_quotes = self.get_daily_quotes(ts_code, recent_start, end_norm)
+        if recent_quotes.empty:
+            logger.warning("AKShare 无法确认最近实际交易日，拒绝生成 daily_basic")
+            return pd.DataFrame()
+        latest_quote = recent_quotes.sort_values("trade_date", ascending=False).iloc[0]
+        actual_trade_date = str(latest_quote["trade_date"])
 
         # AKShare spot 列：代码，名称，最新价，涨跌幅，涨跌额，成交量，成交额，振幅，最高，最低，今开，昨收，量比，换手率，市盈率-动态，市净率，总市值，流通市值，涨速，5分钟涨跌，60日涨跌幅，年初至今涨跌幅
         def to_float(x, default=None):
@@ -372,8 +549,8 @@ class AKShareDataSource(DataSource):
 
         result = pd.DataFrame([{
             "ts_code": ts_code,
-            "trade_date": today,
-            "close": to_float(row.get("最新价")),
+            "trade_date": actual_trade_date,
+            "close": to_float(latest_quote.get("close")),
             "turnover_rate": to_float(row.get("换手率")),
             "turnover_rate_f": None,
             "volume_ratio": to_float(row.get("量比")),
@@ -383,8 +560,9 @@ class AKShareDataSource(DataSource):
             "ps": None,
             "ps_ttm": None,
             "dv_ratio": None,
-            "total_mv": to_float(row.get("总市值")),
-            "circ_mv": to_float(row.get("流通市值")),
+            # AKShare spot 市值单位为元；内部/Tushare daily_basic 契约为万元。
+            "total_mv": yuan_to_wan(row.get("总市值")),
+            "circ_mv": yuan_to_wan(row.get("流通市值")),
             "total_share": None,
             "float_share": None,
             "free_share": None
@@ -427,11 +605,11 @@ class AKShareDataSource(DataSource):
             logger.warning(f"AKShare {report_type}: 无法识别日期列，列名={list(df.columns)[:5]}")
             return pd.DataFrame()
         df = df.rename(columns={date_col: "end_date"})
-        df["end_date"] = df["end_date"].apply(normalize_date_hyphen)
+        df["end_date"] = df["end_date"].apply(normalize_date)
 
         # 过滤日期范围
-        start_norm = normalize_date_hyphen(start_date)
-        end_norm = normalize_date_hyphen(end_date)
+        start_norm = normalize_date(start_date)
+        end_norm = normalize_date(end_date)
         df = df[(df["end_date"] >= start_norm) & (df["end_date"] <= end_norm)]
 
         if df.empty:
@@ -506,7 +684,8 @@ class AKShareDataSource(DataSource):
             "投资活动产生的现金流量净额": "n_cashflow_inv_act",
             "筹资活动产生的现金流量净额": "n_cash_flows_fnc_act",
             "期末现金及现金等价物余额": "c_cash_equ_end_period",
-            "五、现金及现金等价物净增加额": "free_cash_flow",
+            "购建固定资产、无形资产和其他长期资产支付的现金": "c_pay_acq_const_fiolta",
+            "购建固定资产、无形资产及其他长期资产支付的现金": "c_pay_acq_const_fiolta",
         }
         for cn, en in col_map.items():
             if cn in df.columns:
@@ -555,11 +734,11 @@ class AKShareDataSource(DataSource):
                 df[field] = pd.to_numeric(df[field].astype(str).str.replace(",", ""), errors="coerce")
 
         # 标准化日期
-        df["end_date"] = df["end_date"].apply(normalize_date_hyphen)
+        df["end_date"] = df["end_date"].apply(normalize_date)
 
         # 过滤日期范围
-        start_norm = normalize_date_hyphen(start_date)
-        end_norm = normalize_date_hyphen(end_date)
+        start_norm = normalize_date(start_date)
+        end_norm = normalize_date(end_date)
         df = df[(df["end_date"] >= start_norm) & (df["end_date"] <= end_norm)]
 
         if df.empty:
@@ -576,6 +755,117 @@ class AKShareDataSource(DataSource):
     def get_forecast(self, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         # AKShare 暂无业绩预告接口，返回空（依赖主源 Tushare）
         return pd.DataFrame()
+
+    def get_macro_data(self) -> dict:
+        """AKShare 宏观数据（备用源）。每个指标独立容错。"""
+        from datetime import datetime as _dt
+        result = {
+            "update_date": _dt.now().strftime("%Y-%m-%d"),
+            "source": "akshare",
+            "indicators": {},
+            "errors": [],
+        }
+
+        def _try(key, fn):
+            try:
+                val = fn()
+                if val is not None:
+                    result["indicators"][key] = val
+            except Exception as e:
+                result["errors"].append(f"{key}: {e}")
+
+        # GDP
+        def _gdp():
+            df = self.ak.macro_china_gdp_yearly()
+            if df.empty:
+                return None
+            series = []
+            for _, r in df.iterrows():
+                row = {str(k).lower(): v for k, v in r.items()}
+                year = str(row.get("年份", r.iloc[0] if len(df.columns) > 0 else ""))
+                gdp_raw = row.get("国内生产总值") or row.get("gdp") or row.get("总值")
+                yoy_raw = row.get("同比增长") or row.get("gdp_yoy")
+                try:
+                    gdp_val = float(str(gdp_raw).replace(",", "")) if gdp_raw is not None else None
+                    yoy_val = float(str(yoy_raw).replace(",", "")) if yoy_raw is not None else None
+                except Exception:
+                    gdp_val, yoy_val = None, None
+                series.append({"quarter": year, "gdp_yi": round(gdp_val / 1e8, 2)
+                               if gdp_val else None, "yoy_pct": yoy_val})
+            return {"latest": series[-1] if series else {}, "series": series}
+
+        # PMI
+        def _pmi():
+            df = self.ak.macro_china_pmi()
+            if df.empty:
+                return None
+            df = df.tail(6)
+            mfg_trend, svc_trend = [], []
+            for _, r in df.iterrows():
+                row = {str(k).lower(): v for k, v in r.items()}
+                month = str(row.get("月份", row.get("month", row.get("日期", ""))))
+                try:
+                    mv = float(str(row.get("制造业", row.get("pmi010000", ""))).replace(",", ""))
+                    sv = float(str(row.get("非制造业", row.get("pmi020000", ""))).replace(",", ""))
+                except Exception:
+                    mv, sv = None, None
+                mfg_trend.insert(0, {"month": month, "value": mv})
+                svc_trend.insert(0, {"month": month, "value": sv})
+            return {
+                "manufacturing": {"latest": mfg_trend[-1] if mfg_trend else None, "trend": mfg_trend},
+                "non_manufacturing": {"latest": svc_trend[-1] if svc_trend else None, "trend": svc_trend},
+            }
+
+        # CPI/PPI
+        def _cpi_ppi():
+            output = {}
+            for label, fn_name in [("cpi", "macro_china_cpi_monthly"), ("ppi", "macro_china_ppi_yearly")]:
+                try:
+                    df = getattr(self.ak, fn_name)()
+                    if df.empty:
+                        continue
+                    series = []
+                    for _, r in df.tail(6).iterrows():
+                        row = {str(k).lower(): v for k, v in r.items()}
+                        month = str(row.get("月份", row.get("month", row.get("日期", ""))))
+                        v = row.get("居民消费价格指数") or row.get("cpi") or row.get("全国") or row.get("ppi")
+                        try:
+                            v = float(str(v).replace(",", "")) if v is not None else None
+                        except Exception:
+                            v = None
+                        series.insert(0, {"month": month, "yoy_pct": v})
+                    latest = series[-1] if series else {"month": None, "yoy_pct": None}
+                    output[label] = {"latest": latest, "series": series}
+                except Exception:
+                    pass
+            return output if output else None
+
+        # M1/M2
+        def _money():
+            df = self.ak.macro_china_money_supply()
+            if df.empty:
+                return None
+            df = df.tail(6)
+            series = []
+            for _, r in df.iterrows():
+                row = {str(k).lower(): v for k, v in r.items()}
+                month = str(row.get("月份", row.get("month", row.get("日期", ""))))
+                try:
+                    m1 = float(str(row.get("m1同比", row.get("m1_yoy", "0"))).replace(",", ""))
+                    m2 = float(str(row.get("m2同比", row.get("m2_yoy", "0"))).replace(",", ""))
+                except Exception:
+                    m1, m2 = None, None
+                s = round(m1 - m2, 2) if m1 is not None and m2 is not None else None
+                series.insert(0, {"month": month, "m1_yoy_pct": m1,
+                                  "m2_yoy_pct": m2, "scissors_pct": s})
+            latest_s = series[-1]["scissors_pct"] if series else None
+            return {"latest_scissors_pct": latest_s, "series": series}
+
+        for key, fn in [("gdp", _gdp), ("pmi", _pmi), ("inflation", _cpi_ppi),
+                         ("money_supply", _money)]:
+            _try(key, fn)
+
+        return result
 
     def get_annual_report_text(self, ts_code: str, report_year: str) -> dict:
         """
@@ -828,15 +1118,22 @@ class CacheDataSource(DataSource):
             txt = sec_data.get(eng, "")
             if txt:
                 sections[chn] = txt
-        if not sections and sec_data.get("full_text_len", 0) > 0:
-            sections["全文"] = f"({sec_data['full_text_len']} chars, 见 sections JSON)"
+        if not sections and len(full_text.strip()) >= 1000:
+            sections["全文"] = full_text
+        sections = {
+            name: text for name, text in sections.items()
+            if isinstance(text, str) and len(text.strip()) >= 200
+        }
+        if not sections:
+            raise RuntimeError(f"缓存年报只有元数据或占位文本，正文不可用: {ts_code} {report_year}")
 
         return {
             "ts_code": ts_code,
             "report_year": report_year,
             "reports": {
                 "annual": {
-                    "ann_date": f"{report_year}0422",
+                    # 缓存文件没有可靠公告日时保持空值，禁止伪造日期。
+                    "ann_date": "",
                     "title": f"{report_year}年年度报告",
                     "source_url": f"file://{pdf_path}" if os.path.exists(pdf_path) else "",
                     "full_text": full_text,
@@ -871,7 +1168,7 @@ class CacheDataSource(DataSource):
     def get_fina_indicator(self, ts_code, start, end): raise NotImplementedError
     def get_fina_audit(self, ts_code, start, end): raise NotImplementedError
     def get_forecast(self, ts_code, start, end): raise NotImplementedError
-
+    def get_macro_data(self): raise NotImplementedError
 
 
 class FallbackDataSource(DataSource):
@@ -982,6 +1279,27 @@ class FallbackDataSource(DataSource):
     def get_forecast(self, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         return self._fetch("get_forecast", ts_code, start_date, end_date)
 
+    def get_macro_data(self) -> dict:
+        """宏观数据：先主源后备用源。单源失败不抛异常。"""
+        try:
+            result = self.primary.get_macro_data()
+            if result and result.get("indicators"):
+                return result
+        except Exception as e:
+            logger.warning(f"[get_macro_data] 主源 {self.primary.name} 失败: {e}")
+
+        if self.fallback is not None:
+            try:
+                result = self.fallback.get_macro_data()
+                if result and result.get("indicators"):
+                    logger.info(f"[get_macro_data] 备用源 {self.fallback.name} 成功")
+                    return result
+            except Exception as e:
+                logger.warning(f"[get_macro_data] 备用源 {self.fallback.name} 失败: {e}")
+
+        # 两个源都失败，返回空结果
+        return {"update_date": "", "source": "none", "indicators": {}, "errors": ["所有数据源均失败"]}
+
     def get_annual_report_text(self, ts_code: str, report_year: str) -> dict:
         """年报全文抓取：主源→备用源→缓存源（三源依次回退）。"""
         try:
@@ -1030,29 +1348,37 @@ def create_data_source(config: dict) -> DataSource:
         if cfg.get("fallback"):
             fallback_name = name
 
-    primary = None
-    fallback = None
+    def _build(name: Optional[str]) -> Optional[DataSource]:
+        if not name:
+            return None
+        try:
+            if name == "tushare":
+                cfg = ds_config.get("tushare", {})
+                token = os.environ.get(cfg.get("token_env", "TUSHARE_TOKEN"))
+                return TushareDataSource(token=token)
+            if name == "akshare":
+                return AKShareDataSource()
+            raise ValueError(f"未知数据源: {name}")
+        except Exception as exc:
+            logger.warning(f"[create_data_source] {name} 初始化失败: {exc}")
+            return None
 
-    if primary_name == "tushare":
-        token = os.environ.get(ds_config["tushare"]["token_env"])
-        primary = TushareDataSource(token=token)
-    elif primary_name == "akshare":
-        primary = AKShareDataSource()
+    primary = _build(primary_name)
+    fallback = _build(fallback_name)
+    if primary is None and fallback is not None:
+        logger.warning(f"[create_data_source] 主源不可用，改用 {fallback.name} 作为唯一数据源")
+        primary, fallback = fallback, None
+    if primary is None:
+        raise RuntimeError("没有可用数据源：主源与备用源均初始化失败")
 
-    if fallback_name == "tushare":
-        token = os.environ.get(ds_config["tushare"]["token_env"])
-        fallback = TushareDataSource(token=token)
-    elif fallback_name == "akshare":
-        fallback = AKShareDataSource()
-
-    if fallback:
-        cache = None
-        cache_script = os.path.expanduser("~/.codex/skills/cninfo-annual/scripts/fetch.py")
-        if os.path.exists(cache_script):
-            try:
-                cache = CacheDataSource()
-                logger.info("[create_data_source] CacheDataSource 初始化成功")
-            except Exception as e:
-                logger.warning(f"[create_data_source] CacheDataSource 初始化失败: {e}")
+    cache = None
+    cache_script = os.path.expanduser("~/.codex/skills/cninfo-annual/scripts/fetch.py")
+    if os.path.exists(cache_script):
+        try:
+            cache = CacheDataSource()
+            logger.info("[create_data_source] CacheDataSource 初始化成功")
+        except Exception as e:
+            logger.warning(f"[create_data_source] CacheDataSource 初始化失败: {e}")
+    if fallback or cache:
         return FallbackDataSource(primary=primary, fallback=fallback, cache=cache)
     return primary

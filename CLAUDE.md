@@ -14,7 +14,7 @@ invest-skill 是一个**双管道每日分析系统**的 Pipe A。每天分析 2
 每日 cron（10:00 / 14:30）
   │
   ├── Pipe A：invest-skill（本工程）
-  │   ├── 触发：scripts/cron_trigger.sh → claude -p（独立新会话）
+  │   ├── 触发：scripts/cron_trigger.sh → codex exec（独立新会话）
   │   ├── 数据源：Tushare → SQLite（data_tools.py）
   │   ├── 方法论：invest-wiki/04_stock-analysis-expert/ 7+1 专家团
   │   └── 报告：reports/invest_tool/<code>.md  （每公司一个文件）
@@ -34,7 +34,7 @@ invest-skill 是一个**双管道每日分析系统**的 Pipe A。每天分析 2
 
 | | cron 自动分析 | 用户手动分析 |
 |---|---|---|
-| 触发方式 | `scripts/cron_trigger.sh` → `claude -p` | 用户对话中直接指令 |
+| 触发方式 | `scripts/cron_trigger.sh` → `codex exec` | 用户对话中直接指令 |
 | 选股范围 | 全 A 股（排除 688 科创板、8xx 北交所、ST） | 用户指定 |
 | 跳过规则 | 5 天内已分析过 → 跳过，换下一家 | 不跳过，强制从头完整分析 |
 | 状态文件 | `data/auto_state.json` | 不更新 |
@@ -64,32 +64,7 @@ invest-skill 是一个**双管道每日分析系统**的 Pipe A。每天分析 2
 
 #### 自动触发 Pipe B
 
-```bash
-TODAY=$(date +%Y-%m-%d)
-CODE="<ts_code>"
-NAME="<公司名>"
-REPORT_B="reports/ai_berkshire/${CODE}.md"
-
-if [ -f "$REPORT_B" ]; then
-    echo "Pipe B 报告已存在，跳过生成"
-else
-    SHORT="${CODE%.*}"
-    EXCH="${CODE##*.}"
-    if [ "$EXCH" = "SH" ]; then SINA_CODE="SH${SHORT}"; else SINA_CODE="SZ${SHORT}"; fi
-
-    cd ~/ai-berkshire
-    claude --bare -p "
-分析 ${NAME}（${CODE}，新浪代码 ${SINA_CODE}）。
-
-**数据获取**：所有数据必须从 tools/sina_finance.py 获取。
-  - python3 tools/sina_finance.py all ${SINA_CODE}
-
-**分析要求**：按 ai-berkshire 四大师八步框架完成完整分析。
-
-**输出**：报告保存到 ~/invest-skill/${REPORT_B}
-" --permission-mode bypassPermissions --allowedTools "Read,Bash,Write,Edit" 2>&1 | tail -5
-fi
-```
+Pipe B 由 `~/ai-berkshire` 独立工程触发。在 ai-berkshire 目录下调用其自身的分析指令即可，报告输出到 `reports/ai_berkshire/{code}.md`。不在此处硬编码触发命令。
 
 #### 四维对比（只找差距，不找共识）
 

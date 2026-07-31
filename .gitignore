@@ -28,3 +28,7 @@ __pycache__/
 # System
 .DS_Store
 Thumbs.db
+
+# Runtime outputs
+analysis/
+outputs/

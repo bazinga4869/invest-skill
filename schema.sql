@@ -158,6 +158,7 @@ CREATE TABLE IF NOT EXISTS balance (
     bonds_payable REAL,                  -- 应付债券
     total_cur_liab REAL,
     total_noncur_liab REAL,
+    total_share REAL,                    -- 总股本（万股）
     updated_at TEXT NOT NULL,
     UNIQUE(ts_code, end_date, report_type),
     FOREIGN KEY (ts_code) REFERENCES stocks(ts_code)
@@ -177,7 +178,8 @@ CREATE TABLE IF NOT EXISTS cashflow (
     n_cashflow_act REAL,                 -- 经营活动现金流净额
     n_cashflow_inv_act REAL,             -- 投资活动现金流净额
     n_cash_flows_fnc_act REAL,           -- 筹资活动现金流净额
-    free_cash_flow REAL,                 -- 自由现金流（可自定义计算）
+    c_pay_acq_const_fiolta REAL,          -- 购建固定资产/无形资产等支付的现金（资本开支）
+    free_cash_flow REAL,                 -- 数据源自由现金流（若提供；分析口径另以 OCF-资本开支计算）
     im_net_cashflow_oper_act REAL,
     updated_at TEXT NOT NULL,
     UNIQUE(ts_code, end_date, report_type),
@@ -219,17 +221,16 @@ CREATE TABLE IF NOT EXISTS fina_indicators (
 
 CREATE INDEX IF NOT EXISTS idx_fina_code_date ON fina_indicators(ts_code, end_date);
 
--- 10. 审计意见
+-- 10. 审计意见（列名与 Tushare fina_audit API 返回值对齐）
 CREATE TABLE IF NOT EXISTS fina_audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts_code TEXT NOT NULL,
     ann_date TEXT,
     end_date TEXT NOT NULL,
-    audit_agency TEXT,
-    sign_agency TEXT,
-    audit_sign REAL,
-    opinion_type TEXT,                   -- 标准无保留/保留/否定/无法表示
-    audit_costs REAL,
+    audit_result TEXT,                   -- 审计意见：标准无保留/保留/否定/无法表示
+    audit_fees REAL,                     -- 审计费用（元）
+    audit_agency TEXT,                   -- 审计机构
+    audit_sign TEXT,                     -- 审计签字会计师
     updated_at TEXT NOT NULL,
     UNIQUE(ts_code, end_date),
     FOREIGN KEY (ts_code) REFERENCES stocks(ts_code)
