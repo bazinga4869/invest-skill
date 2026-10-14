@@ -169,7 +169,17 @@ python3 04_stock-analysis-expert/tools/gate_precheck.py /tmp/check.md --expert <
 - ⚠️ `tools/attribution_check.py` 只是"数字旁有没有 token"的**启发式筛查，不是门禁判定**：
   门禁另有值匹配（`values_match`）、单位兼容（`units_compatible`）、左右文语义（`semantic_ok`）、
   行业样本质量（`source_quality_ok`）四条判定。实测 `-06`：它报 0 未溯源，门禁报 9 个。
-- 顺序：`begin` → 子代理产出 → 两步自检 → `commit` → `advance`
+- 顺序：**`prepare` → 注入门禁 → `begin` → 子代理产出 → 两步自检 → `commit` → `advance`**
+
+### 第 0 步：注入门禁（prepare 后、begin 前，缺一不可）
+
+```bash
+python3 04_stock-analysis-expert/tools/injection_gate.py --runtime ../invest-skill-runtime --code <code>
+```
+
+- 确认 7 份 prompt **真的带上**必须遵守的规则串（默认 `提交前归属规则`、`待验证假设清单`），并交叉校验 7 份的 `batch_id` 一致
+- 退出码 0 才允许 `begin`；不为 0 **不得派发专家**（`-04` 整批作废就是漏了这一步）
+- 建议把 stdout 归档到 `docs/evidence/injection-gate-<timestamp>.txt`，作为"规则确实到达专家"的原始证据
 
 验收记录（2026-10-14，真实产物）：
 - `gate_precheck.py` 对 `-06` 五份 FAIL 产出完全复现门禁判词（cognitive 2、financial 1+1 矛盾、moat 4、value 1、management 1），对通过件 growth-assessor 返回 exit 0
