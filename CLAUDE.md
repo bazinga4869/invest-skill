@@ -161,7 +161,7 @@ python3 scripts/expert_result_v3.py compile <code> <expert> <staged.next> \
     --sidecar /tmp/check.v3.json --markdown /tmp/check.md
 
 # 第二步：权威门禁预检（直接调用 skill 的诊断代码，与机器门禁同源）
-python3 04_stock-analysis-expert/tools/gate_precheck.py /tmp/check.md --expert <expert>
+python3 "$INVEST_PANEL_TOOLS/gate_precheck.py" /tmp/check.md --expert <expert>
 ```
 
 - **第二步退出码 0 才允许 `commit`**；不为 0 按 repair 流程把诊断交回该专家，**不得手改产物、不得删证据**
@@ -174,7 +174,7 @@ python3 04_stock-analysis-expert/tools/gate_precheck.py /tmp/check.md --expert <
 ### 第 0 步：注入门禁（prepare 后、begin 前，缺一不可）
 
 ```bash
-python3 04_stock-analysis-expert/tools/injection_gate.py --runtime ../invest-skill-runtime --code <code>
+python3 "$INVEST_PANEL_TOOLS/injection_gate.py" --runtime ../invest-skill-runtime --code <code>
 ```
 
 - 确认 7 份 prompt **真的带上**必须遵守的规则串（默认 `提交前归属规则`、`待验证假设清单`），并交叉校验 7 份的 `batch_id` 一致
