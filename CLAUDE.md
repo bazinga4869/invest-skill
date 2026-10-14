@@ -153,26 +153,28 @@ Pipe B 由 `~/ai-berkshire` 独立工程触发。在 ai-berkshire 目录下调�
 
 ## 提交前自检（编排方执行，专家无 shell）
 
-专家 subagent 只读自己那份 prompt、禁止 shell，**跑不了脚本**。所以自检由**编排方**在 `commit` 之前执行。注意 staged 文件是 **v3 结果 JSON**（正文用 `{{F001}}` 占位，数值在渲染时才出现），**不能直接扫 JSON**，必须两步走：
+专家 subagent 只读自己那份 prompt、禁止 shell，**跑不了脚本**。自检由**编排方**在 `commit` 之前执行。staged 文件是 **v3 结果 JSON**（正文用 `{{F001}}` 占位，数值渲染后才出现），**不能直接扫 JSON**，必须两步：
 
 ```bash
-# 第一步：skill 自带校验 + 渲染（校验不过即停，通常轮不到第二步）
+# 第一步：skill 自带校验 + 渲染（不过即停）
 python3 scripts/expert_result_v3.py compile <code> <expert> <staged.next> \
     --sidecar /tmp/check.v3.json --markdown /tmp/check.md
 
-# 第二步：扫渲染文本里的未溯源数字
-python3 04_stock-analysis-expert/tools/attribution_check.py /tmp/check.md
+# 第二步：权威门禁预检（直接调用 skill 的诊断代码，与机器门禁同源）
+python3 04_stock-analysis-expert/tools/gate_precheck.py /tmp/check.md --expert <expert>
 ```
 
-- 第一步退出码非 0（裸阿拉伯数字、token 合同、calc 复算、必检项覆盖等）→ 按 skill 既有 repair 流程交回该专家，**不得手改产物**
-- 第二步退出码 `0` 才允许 `commit`；不为 `0` 同样走 repair
-- **不得为了让校验通过而删证据或把数字改成模糊表述**
+- **第二步退出码 0 才允许 `commit`**；不为 0 按 repair 流程把诊断交回该专家，**不得手改产物、不得删证据**
+- 第二步覆盖 `untraced_numbers` / `unsourced_claims` / `qualitative_contradictions` / `invalid_*` 全部阻塞类
+- ⚠️ `tools/attribution_check.py` 只是"数字旁有没有 token"的**启发式筛查，不是门禁判定**：
+  门禁另有值匹配（`values_match`）、单位兼容（`units_compatible`）、左右文语义（`semantic_ok`）、
+  行业样本质量（`source_quality_ok`）四条判定。实测 `-06`：它报 0 未溯源，门禁报 9 个。
 - 顺序：`begin` → 子代理产出 → 两步自检 → `commit` → `advance`
 
 验收记录（2026-10-14，真实产物）：
-- 正向：`-05` 的 2 份真实 staged `.next` → 第一步 COMPILED → 第二步 **0 未溯源**；更早在 6 份门禁通过产出的渲染文本上同样 0 误报
-- 反向：在必检项里注入裸数字 `3.5 次` → 第一步即拒绝（`prose token 合同错误 … 含裸阿拉伯数字`），退出码 2
-- 防呆：直接把 staged JSON 喂给第二步会以退出码 2 拒绝，并打印正确两步流程
+- `gate_precheck.py` 对 `-06` 五份 FAIL 产出完全复现门禁判词（cognitive 2、financial 1+1 矛盾、moat 4、value 1、management 1），对通过件 growth-assessor 返回 exit 0
+- 反向：注入裸数字 `3.5 次` → 第一步即拒绝（`含裸阿拉伯数字`）
+- 防呆：把 staged JSON 直接喂第二步会以退出码 2 拒绝并打印正确流程
 
 注入说明（重要）：专家 prompt 里**只有专家页正文**是无条件嵌入的（`prepare_prompts.py` 第 1136 行 `{method_text}`）；`_panel.md` 与 `_schema.md` 走 `{sage_context or supp}` 通道（第 1146 行），**sage 有上下文时会被挤掉、不进 prompt**。因此凡是要让专家看到的规则，必须写进 `experts/0*.md` 专家页，而不是只写 `_schema.md`。
 
