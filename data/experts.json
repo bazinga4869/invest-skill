@@ -1,0 +1,11 @@
+{
+  "experts": [
+    {"id": "financial-auditor",   "file": "01-财务排雷官"},
+    {"id": "value-valuator",      "file": "02-价值估值师"},
+    {"id": "growth-assessor",     "file": "03-成长质量师"},
+    {"id": "moat-analyst",        "file": "04-护城河分析师"},
+    {"id": "cognitive-controller","file": "05-认知风控官"},
+    {"id": "macro-cyclist",       "file": "06-宏观周期师"},
+    {"id": "management-auditor",  "file": "07-管理层审计师"}
+  ]
+}

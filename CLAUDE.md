@@ -4,19 +4,21 @@
 
 ## Skill 入口
 
-分析协议、专家团架构、spawn 命令模板等全部在 `SKILL.md` 中定义。本文件只包含项目基础设施配置。
+分析协议、专家团架构和执行命令全部在 `SKILL.md` 中定义。本文件只包含项目基础设施配置。
 
 ## 双管道日报系统
 
 invest-skill 是一个**双管道每日分析系统**的 Pipe A。每天分析 2 家公司，每家公司产出两份**完全独立**的报告：
 
 ```
-每日 cron（10:00 / 14:30）
-  │
+每日 cron（02:00 / 04:30，DeepSeek API 低谷期 00:30–08:30 内执行）
+  │  ⚠️ 调度权归宿主 invest-harness：crontab 条目全部指向
+  │     ~/invest-harness/scripts/cron/cron_*.sh（wrapper），本仓库不持有任何定时配置
   ├── Pipe A：invest-skill（本工程）
-  │   ├── 触发：scripts/cron_trigger.sh → codex exec（独立新会话）
+  │   ├── 触发：宿主 wrapper → scripts/cron_trigger.sh → dsh --profile headless（独立新会话，与 GUI 同模型/skill 目录）
   │   ├── 数据源：Tushare → SQLite（data_tools.py）
-  │   ├── 方法论：invest-wiki/04_stock-analysis-expert/ 7+1 专家团
+  │   ├── 年报证据：../invest-report-wiki → 逐页原文 + 本地 FTS5/BM25 bundle（Sage 摘要可选）
+  │   ├── 知识检索：invest-sage → 分专家 sage-wiki live/cache（7+1 执行契约在本工程）
   │   └── 报告：reports/invest_tool/<code>.md  （每公司一个文件）
   │
   └── Pipe B：ai-berkshire（独立工程 ~/ai-berkshire/）
@@ -25,16 +27,21 @@ invest-skill 是一个**双管道每日分析系统**的 Pipe A。每天分析 2
       └── 报告：reports/ai_berkshire/<code>.md  （每公司一个文件，增量修订）
 ```
 
+**调度职责边界**：本仓库只提供**执行能力**（cron_trigger.sh / daily_analysis.sh / watchdog.sh /
+alert.sh 等被调用入口），**不拥有 crontab 条目、不自行注册定时任务**。"何时跑、跑几次"由调用方
+（本机为 invest-harness）决定，通过 `scripts/cron/cron_*.sh` wrapper 注入环境并调用本仓库脚本。
+
 **关键约束**：
 - 🚫 两份报告完全独立，不互相引用、不汇总、不交叉验证
 - 🚫 invest-skill 不得使用新浪数据；ai-berkshire 不得使用 Tushare 数据
 - 🚫 不得修改 ai-berkshire 的任何已有文件
+- 🚫 认知任务不得自动启动 Codex/Claude/DSH 等外部 CLI；只用当前主 agent 的原生子代理，且不覆盖 provider/model
 
 ### 自动分析 vs 手动分析
 
 | | cron 自动分析 | 用户手动分析 |
 |---|---|---|
-| 触发方式 | `scripts/cron_trigger.sh` → `codex exec` | 用户对话中直接指令 |
+| 触发方式 | `scripts/cron_trigger.sh` → `dsh --profile headless` | 用户对话中直接指令 |
 | 选股范围 | 全 A 股（排除 688 科创板、8xx 北交所、ST） | 用户指定 |
 | 跳过规则 | 5 天内已分析过 → 跳过，换下一家 | 不跳过，强制从头完整分析 |
 | 状态文件 | `data/auto_state.json` | 不更新 |
@@ -47,16 +54,28 @@ invest-skill 是一个**双管道每日分析系统**的 Pipe A。每天分析 2
 | `SKILL.md` | **Skill 定义**（分析协议、专家团架构） |
 | `shared/data_tools.py` | 数据获取工具（纯取数 + 基础数学） |
 | `shared/data_source.py` | Tushare + AKShare 抽象层 |
-| `data/` | SQLite 数据库 |
-| `reports/` | 分析报告输出 |
-| `config.yaml` | 项目配置 |
+| `shared/report_wiki.py` | invest-report-wiki 公共 CLI 与 bundle 契约适配器 |
+| `config.yaml` | 项目配置（`paths.runtime_root` 可指定运行时根） |
+
+**运行时产物不落本仓库**：SQLite 数据库、日志、报告、`auto_state.json` 等全部写入
+调用方 `INVEST_SKILL_HOME` 指定的运行时根（本机为
+`~/invest-harness/.invest-skill-runtime/`）。本仓库只保留 skill 资产
+（协议、脚本、静态契约 `data/experts.json` 等）。路径解析统一走
+`shared/project_config.py`（`runtime_root()` / `configured_path()`），不要硬编码。
 
 ## Wiki 联动
 
-专家团配置来自 `../invest-wiki/04_stock-analysis-expert/`。wiki 的 `_schema.md` 定义了自迭代机制：
+专家团执行契约仍由本 skill 的 `data/` 和旧版专家文件兼容层提供；通用投资知识
+统一从 `../invest-sage` 通过 `sage-wiki query --scope local --format json` 检索，不直接读取
+Sage 私有数据库；查询结果按专家主题写入 `INVEST_SKILL_HOME/data/sage_wiki_cache/`，
+以内容哈希校验并支持 402/超时/网络失败时降级：
 - wiki 中专家依赖的知识页面发生结构性变更时，专家团按自迭代机制更新
 - 每次分析前检查 `_cache.json` 中的 `expert_versions`，若版本落后超过 7 天，提示检查 wiki 更新
 - 分析完成后，将可复用的通用洞见回流到 wiki 对应的案例库
+
+公司财报语料由独立 `../invest-report-wiki/` 管理。invest-skill 只调用
+`bin/report-wiki materialize` 并归档其 bundle，不读取 Sage 私有数据库，不把
+财报知识页当作 PDF 原文；年报证据只来自 report-wiki bundle。
 
 ## 跨管道对比迭代（第八步）
 
@@ -94,7 +113,7 @@ Pipe B 由 `~/ai-berkshire` 独立工程触发。在 ai-berkshire 目录下调�
 记录到 data/improvement_candidates.json
        │
        ├── target: skill → 修改 SKILL.md / config.yaml / data_tools.py
-       ├── target: wiki  → 修改 invest-wiki 专家文件或方法论页面
+       ├── target: wiki  → 更新 invest-sage 来源/查询契约
        └── target: data  → 扩展 data_tools.py 数据获取能力
        │
        ▼
@@ -103,3 +122,45 @@ Pipe B 由 `~/ai-berkshire` 独立工程触发。在 ai-berkshire 目录下调�
        ▼
 下次分析时 skill 和 wiki 已进化 → 报告质量螺旋上升
 ```
+
+---
+
+## 移植后环境（2026-10-14 起生效，必读）
+
+本工程已从外置盘移植到已授权工作区。上文提及 `../invest-sage`、`~/invest-harness/.invest-skill-runtime/`
+的段落属**移植前的历史描述**，以本节为准：
+
+| 项 | 现在 |
+|---|---|
+| 工程根 | `/Users/bazinga/.dsh/bot/workspace/invest/invest-skill` |
+| 运行时根 | `../invest-skill-runtime`（已固定在 `config.yaml` 的 `paths.runtime_root`，**不需要** export `INVEST_SKILL_HOME`） |
+| 解释器 | `.venv-macos/bin/python`；或每次开工先 `source ../activate.sh`（把 venv 放到 PATH 最前，避免仓内硬编码 `python3` 踩空） |
+| 数据层 | `../invest-report-wiki`（自带 `.venv-macos`，PDF 依赖 pypdfium2 / pdfplumber） |
+| 知识层 | `../invest-kb`（投资知识库 AI-Wiki 的桥接仓）：`wiki/concepts/` 是**生成物禁改**，`04_stock-analysis-expert/` 是**人手维护的专家面板** |
+| 知识检索 | `invest-kb` MCP，或 `http://127.0.0.1:8787`，或 `sage-wiki` shim |
+| 移植说明 | `../PORTING.md`（全部改动、修复记录与校验结果） |
+
+## 编排规则（必须遵守）
+
+1. **默认深度分析**：用户只给标的（"分析 XX 公司"）→ 直接按**深度 7+1** 跑完整流程，不要停下来问模式。
+2. 只有用户**明说**"精简 / 快速核验 / 只核对某个事实"才走窄路径；窄路径必须先确认要核对的具体事实，**不得冒充完整报告**。
+3. **模式只能升级不能降级**：窄 → 深可直接升级；深 → 窄必须用户开口。
+4. **批次运行期间禁止改动 `../invest-kb/04_stock-analysis-expert/`（专家面板目录）**。`prepare_prompts.py` 把 `wiki_hash = tree_hash(wiki_expert_root())` 绑进批次身份，绑的就是这个目录；`wiki/concepts/` 下的镜像是生成物、由维护流程重建，**不影响**批次。契约与面板改动只在**批次之间**做。
+5. **两个标识分开记**：报告与 manifest 只带数据包 `batch_id`（skill 冻结契约）；任务批次号只写编排台账 `batches/<批次号>/batch.json`，**不进报告结构**。
+6. **编排方无结论权**：报告由 `assemble_report.py` 生成，不得手写；发布前必须经投研复核签字。
+
+## 提交前自检（编排方执行，专家无 shell）
+
+专家 subagent 只读自己那份 prompt、禁止 shell，**跑不了脚本**。所以归属自检由**编排方**在 `commit` 之前执行：
+
+```bash
+python3 04_stock-analysis-expert/tools/attribution_check.py \
+  <staged 输出文件，形如 .invest_native_output_<code>_<phase>_<role>.<token>.next>
+```
+
+- 退出码 `0` 才允许 `commit`；不为 `0` 就按 skill 既有 repair 流程把未溯源行交回该专家修，**不得手改产物、不得为了让校验通过而删证据**
+- 该脚本与机器门禁同口径（含全部豁免），但**只覆盖数字溯源**；`[calc:]` 复算、必检项覆盖等仍以机器门禁为准
+- 顺序：`begin` → 子代理产出 → **跑本脚本** → `commit` → `advance`
+
+注入说明（重要）：专家 prompt 里**只有专家页正文**是无条件嵌入的（`prepare_prompts.py` 第 1136 行 `{method_text}`）；`_panel.md` 与 `_schema.md` 走 `{sage_context or supp}` 通道（第 1146 行），**sage 有上下文时会被挤掉、不进 prompt**。因此凡是要让专家看到的规则，必须写进 `experts/0*.md` 专家页，而不是只写 `_schema.md`。
+

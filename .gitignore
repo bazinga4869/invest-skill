@@ -1,5 +1,10 @@
 # Data & Reports
-data/
+# 运行时产物（DB/auto_state 等）不落本仓库；data/ 仅保留静态契约文件
+data/*
+!data/.gitkeep
+!data/experts.json
+!data/expert_checklist.json
+!data/checklist_evidence_rules.json
 reports/
 
 # Secrets & local state
