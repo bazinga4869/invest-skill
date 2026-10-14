@@ -1,17 +1,39 @@
 project:
   name: invest-skill
-  version: 0.5.1
+  version: 0.7.0
   # 留空 = 取系统当天（日常/cron 必须如此）；仅历史回测时钉日期，如 '2026-07-20'
   analysis_date:
 paths:
+  # 运行时根：DB/日志/报告/状态文件都落在该目录下，不回写 skill 仓库。
+  # 优先级：环境变量 INVEST_SKILL_HOME > 本项（绝对路径）> skill 仓库（向后兼容）。
+  # skill 被任意项目调用时，由调用方设置 INVEST_SKILL_HOME 指向自己的运行时目录。
+  runtime_root:
   data_dir: ./data
   reports_dir: ./reports
   invest_tool_dir: ./reports/invest_tool
   ai_berkshire_dir: ./reports/ai_berkshire
   db_file: ./data/invest_skill.db
   schema_file: ./schema.sql
+report_wiki:
+  repo_path: ../invest-report-wiki
+  cli_path: ../invest-report-wiki/bin/report-wiki
+  materialize_timeout_seconds: 3600
+  history_years: 5
+  report_types: [annual]
+  evidence_only: true
+  require_local_search: true
 wiki_dependencies:
-  repo_path: ../invest-wiki
+  repo_path: ../invest-kb  # 知识层：投资知识库 AI-Wiki 的桥接仓（wiki/concepts 为生成物，04_stock-analysis-expert 为面板）
+  legacy_contract_repo_path: ../invest-wiki
+  query_timeout_seconds: 60
+  cache:
+    enabled: true
+    # 相对路径始终解析到 INVEST_SKILL_HOME，不写回 skill 资产仓库。
+    dir: data/sage_wiki_cache
+    fresh_days: 7
+    max_stale_days: 90
+    # 无通过校验缓存时保持 fail-closed；不以测试/builtin 内容伪造 Sage 结果。
+    allow_builtin_without_cache: false
   expert_panel:
     base_path: 04_stock-analysis-expert
     schema: 04_stock-analysis-expert/_schema.md
