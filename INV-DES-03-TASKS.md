@@ -43,14 +43,14 @@
 
 ## INV-DES-03-REVIEW-75-READONLY-01 — Independent bounded document review
 
-- **Status:** COMPLETED — bounded stage review returned `FAIL` for the submitted partial package; TASK-3 ledger status is corrected from WAIT_ACK to completed-for-bounded-verdict only. This is not full REM sign-off, overall design approval, or engineering QA.
+- **Status:** BOUNDED_STAGE_REVIEW_COMPLETED / FULL_TASK_NOT_ACCEPTED — 投研复核 explicitly confirmed in `invest-skill开发群` that this limited stage review is complete with verdict `FAIL`; only the partial B1–B6 and REM-01/03 material was reviewed. This does not complete the full TASK-3 scope, full REM sign-off, overall design approval, or engineering QA. No longer WAIT_ACK for this bounded stage; broader/full-scope review remains not accepted and requires complete dependencies plus a renewed group-visible assignment/ACK.
 - **Owner:** 投研复核 (ACKed and performed the bounded review).
 - **Permission:** Read-only review of the stable B1–B6 evidence map and REM matrix documents only. No code/source execution, tests, runtime/data, provider, credentials, or engineering-QA claims.
 - **Dependencies:** Stable, readable B1–B6 mapping and bounded REM-01/03 excerpts were available at the cited matrix paths; REM-02/04–09 remain incomplete and outside this stage verdict. Reviewer ACKed the bounded stage review in the group and stated ETA within 2 hours after complete package.
 - **Acceptance criteria:** Check version/time consistency, evidence classifications and exclusions, duplicate counting, integrity-versus-authenticity/authorization threat-model distinction, and whether any unknown/unverified item was promoted to PASS. Return `PASS / FAIL / BLOCKED` with cited lines and precise corrections. This is not engineering QA.
-- **Deliverable/result:** 投研复核 reported `FAIL` for ledger consistency: B1–B6 mapping and REM-01/03 bounded evidence passed locally, but this ledger incorrectly remained WAIT_ACK and said review could only start after all tasks completed. Update this TASK-3 record to capture the bounded review while retaining all residual blocks. Evidence: group verdict and `INV-DES-03-MATRIX-INDEX.md:23-33`, `INV-DES-03-MATRIX-REMAINING.md:15,17`.
+- **Deliverable/result:** 投研复核 reported stage verdict `FAIL` for ledger consistency: B1–B6 mapping and REM-01/03 bounded evidence passed locally, but the ledger had remained WAIT_ACK and said review could only start after all tasks completed. The reviewer later explicitly confirmed in the group that this limited stage review is complete and the FAIL summary is accurate. Record this as a completed bounded stage verdict only, retaining all residual blocks. Evidence: group verdict/confirmation and `INV-DES-03-MATRIX-INDEX.md:23-33`, `INV-DES-03-MATRIX-REMAINING.md:15,17`.
 - **Residual scope:** REM-02/04–09 are not reviewed or passed; overall identity gate remains BLOCKED / not READY_FOR_CODE. Any broader review requires a new/renewed group-visible scope and ACK.
-- **Next action:** PM records this bounded verdict and maintains TASK-1/2 incomplete status; do not promote partial review to full completion.
+- **Next action:** PM retains this completed bounded verdict; TASK-1/2 remain incomplete and REM-02/04–09 remain BLOCKED/not reviewed. Any full-scope follow-up requires dependencies to be complete and a new group-visible assignment and reviewer ACK; do not promote this partial review to full completion.
 
 ## Group-visible assignment / acceptance log
 
