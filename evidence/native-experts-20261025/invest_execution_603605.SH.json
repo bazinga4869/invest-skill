@@ -1,0 +1,106 @@
+{
+  "schema_version": "invest-skill.execution.v2",
+  "ts_code": "603605.SH",
+  "data_date": "20261023",
+  "analysis_date": "20261025",
+  "batch_id": "d4450143cd0858a8260f0bd4",
+  "worker_policy": "host-native-inherit-provider-model-single-prompt-staged-output",
+  "report_wiki": {
+    "schema_version": "report-wiki.bundle.v2",
+    "evidence_status": "PASS",
+    "summary_status": "UNAVAILABLE",
+    "bundle_hash": "0448ef3bbf654c84f45e54d9b3a1f4be4ed6d2a24a07a340af6d3bfbc2ed5d81",
+    "corpus_hash": "9f512c8bfeb191435599b31c4ad99530c6041cc0b434d125b10624bd20a5a3a8",
+    "search_content_hash": "4de4c2698a01e3dcc85ceafcc31dbc4efeb1a761796bb4982fbc59387e7d6751"
+  },
+  "sage_wiki": {
+    "status": "DEGRADED",
+    "mode": "cache",
+    "error": "financial-auditor: Sage Wiki query exit=1: 投资知识库检索失败：URLError: <urlopen error [Errno 61] Connection refused>；value-valuator: Sage Wiki query exit=1: 投资知识库检索失败：URLError: <urlopen error [Errno 61] Connection refused>；growth-assessor: Sage Wiki query exit=1: 投资知识库检索失败：URLError: <urlopen error [Errno 61] Connection refused>；moat-analyst: Sage Wiki query exit=1: 投资知识库检索失败：URLError: <urlopen error [Errno 61] Connection refused>；cognitive-controller: Sage Wiki query exit=1: 投资知识库检索失败：URLError: <urlopen error [Errno 61] Connection refused>；macro-cyclist: Sage Wiki query exit=1: 投资知识库检索失败：URLError: <urlopen error [Errno 61] Connection refused>；management-auditor: Sage Wiki query exit=1: 投资知识库检索失败：URLError: <urlopen error [Errno 61] Connection refused>",
+    "snapshot_date": "2026-10-14",
+    "topics": {
+      "financial-auditor": {
+        "mode": "cache",
+        "snapshot_date": "2026-10-14",
+        "model": "configured-by-invest-sage",
+        "content_sha256": "96a7f857e16c1ac9c55bf4947d389fdd38d2ca9306b1bd611d710c3de660f16c",
+        "error": "Sage Wiki query exit=1: 投资知识库检索失败：URLError: <urlopen error [Errno 61] Connection refused>"
+      },
+      "value-valuator": {
+        "mode": "cache",
+        "snapshot_date": "2026-10-14",
+        "model": "configured-by-invest-sage",
+        "content_sha256": "9c67ca417eedbe7c403b5ed57d5a536ac2dcf94ec2ba96431bb0b05fd3271d4a",
+        "error": "Sage Wiki query exit=1: 投资知识库检索失败：URLError: <urlopen error [Errno 61] Connection refused>"
+      },
+      "growth-assessor": {
+        "mode": "cache",
+        "snapshot_date": "2026-10-14",
+        "model": "configured-by-invest-sage",
+        "content_sha256": "585116a44d7dd100f7ae093e7637e161a83a8d042b95feaf0957ce8058efc106",
+        "error": "Sage Wiki query exit=1: 投资知识库检索失败：URLError: <urlopen error [Errno 61] Connection refused>"
+      },
+      "moat-analyst": {
+        "mode": "cache",
+        "snapshot_date": "2026-10-14",
+        "model": "configured-by-invest-sage",
+        "content_sha256": "a9ce6a71000fe532a359681f505153b22ca1f946a8eb0e711f7ad180ca96badd",
+        "error": "Sage Wiki query exit=1: 投资知识库检索失败：URLError: <urlopen error [Errno 61] Connection refused>"
+      },
+      "cognitive-controller": {
+        "mode": "cache",
+        "snapshot_date": "2026-10-14",
+        "model": "configured-by-invest-sage",
+        "content_sha256": "24373e69266dce91c7acc6cd18e72da4e988f507c175305c0048e9f0b6d5d985",
+        "error": "Sage Wiki query exit=1: 投资知识库检索失败：URLError: <urlopen error [Errno 61] Connection refused>"
+      },
+      "macro-cyclist": {
+        "mode": "cache",
+        "snapshot_date": "2026-10-14",
+        "model": "configured-by-invest-sage",
+        "content_sha256": "8750b05cd5959980c009bf200a33216087698f26bc63422cc5d6984b5c9eedff",
+        "error": "Sage Wiki query exit=1: 投资知识库检索失败：URLError: <urlopen error [Errno 61] Connection refused>"
+      },
+      "management-auditor": {
+        "mode": "cache",
+        "snapshot_date": "2026-10-14",
+        "model": "configured-by-invest-sage",
+        "content_sha256": "7e400f78ef8bef8fcbf00669cfe7641af9bcec53a9b9a37cb65e1899a464d179",
+        "error": "Sage Wiki query exit=1: 投资知识库检索失败：URLError: <urlopen error [Errno 61] Connection refused>"
+      }
+    }
+  },
+  "phases": {
+    "experts": {
+      "backend": "host-native",
+      "host": "current-agent",
+      "model": "inherit-parent",
+      "cli_version": "inherited-from-host",
+      "concurrency": 2,
+      "timeout_seconds": null,
+      "repair_max_passes": 3,
+      "recorded_at": "2026-10-25T13:49:36.050727+00:00",
+      "pid": 55400,
+      "latest_action": "BEGIN",
+      "latest_status": "RECORDED",
+      "transaction_id": "2e3c97d7805891517d1515eb"
+    }
+  },
+  "events": [
+    {
+      "seq": 1,
+      "phase": "experts",
+      "action": "BEGIN",
+      "status": "RECORDED",
+      "transaction_id": "2e3c97d7805891517d1515eb",
+      "job_id": null,
+      "content_hash": null,
+      "detail": null,
+      "backend": "host-native",
+      "host": "current-agent",
+      "model": "inherit-parent",
+      "recorded_at": "2026-10-25T13:49:36.050727+00:00",
+      "pid": 55400
+    }
+  ]
+}
