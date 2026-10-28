@@ -10,6 +10,7 @@ sys.path.insert(0, str(SKILL_ROOT))
 
 from shared.checklist_verify import print_checklist_report, verify_checklist
 from shared.contracts import normalize_ts_code
+from shared.runtime import RUNTIME_ROOT
 
 
 def read_target(report_path: str | None, ts_code: str | None) -> str:
@@ -21,10 +22,10 @@ def read_target(report_path: str | None, ts_code: str | None) -> str:
     if not ts_code:
         raise ValueError("必须提供 report_path 或 --code")
     chunks = []
-    for path in sorted(Path("/tmp").glob(f"invest_result_{ts_code}_*.md")):
+    for path in sorted(RUNTIME_ROOT.glob(f"invest_result_{ts_code}_*.md")):
         chunks.append(path.read_text(encoding="utf-8"))
     if not chunks:
-        raise FileNotFoundError(f"没有找到 /tmp/invest_result_{ts_code}_*.md")
+        raise FileNotFoundError(f"没有找到 {RUNTIME_ROOT}/invest_result_{ts_code}_*.md")
     return "\n\n".join(chunks)
 
 

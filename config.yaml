@@ -6,8 +6,8 @@ project:
 paths:
   # 运行时根：DB/日志/报告/状态文件都落在该目录下，不回写 skill 仓库。
   # 优先级：环境变量 INVEST_SKILL_HOME > 本项（绝对路径）> skill 仓库（向后兼容）。
-  # skill 被任意项目调用时，由调用方设置 INVEST_SKILL_HOME 指向自己的运行时目录。
-  runtime_root:
+  # 移植后固定为绝对路径：不依赖调用方是否导出了 INVEST_SKILL_HOME。
+  runtime_root: /Users/bazinga/.dsh/bot/workspace/invest/invest-skill-runtime
   data_dir: ./data
   reports_dir: ./reports
   invest_tool_dir: ./reports/invest_tool

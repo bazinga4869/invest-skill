@@ -16,6 +16,8 @@ import sys
 from pathlib import Path
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(SKILL_ROOT))
+from shared.runtime import RUNTIME_ROOT
 
 # 专家列表
 EXPERTS_DATA = json.loads((SKILL_ROOT / "data" / "experts.json").read_text(encoding="utf-8"))
@@ -38,7 +40,7 @@ def get_current_scores(ts_code: str) -> dict:
     """从 /tmp/invest_result_*.md 读取本次各专家评分。"""
     scores = {}
     for eid in EXPERTS:
-        p = Path(f"/tmp/invest_result_{ts_code}_{eid}.md")
+        p = RUNTIME_ROOT / f"invest_result_{ts_code}_{eid}.md"
         if p.exists():
             fm = parse_frontmatter(p.read_text(encoding="utf-8"))
             s = fm.get("score")
@@ -50,7 +52,8 @@ def get_current_scores(ts_code: str) -> dict:
 
 def get_historical_baselines() -> dict:
     """从 activity log 读取历史专家评分，计算每专家均值/标准差。"""
-    log_path = SKILL_ROOT / "logs" / "activity.jsonl"
+    from shared.project_config import runtime_root
+    log_path = runtime_root() / "logs" / "activity.jsonl"
     history = {eid: [] for eid in EXPERTS}
     if not log_path.exists():
         return {eid: {"n": 0} for eid in EXPERTS}

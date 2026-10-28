@@ -9,4 +9,4 @@ Hermes 不直接执行 7 专家分析（那是 LLM agent 的工作）。Hermes �
 - 定时触发：cron 调度 `scripts/cron_trigger.sh`
 - Git push + 坚果云同步
 
-Hermes 如需触发完整分析流程，应调用 Codex 或 Claude Code 执行 SKILL.md。
+Hermes 如需触发完整分析流程，应交给当前宿主 agent 执行 SKILL.md，并使用该宿主的原生子代理；不得硬编码或切换到 Codex/Claude CLI。宿主不提供原生子代理时应在模型调用前停止。

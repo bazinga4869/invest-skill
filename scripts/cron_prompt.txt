@@ -1,35 +1,20 @@
 ## 任务：自动化每日股票分析（cron 触发）
 
 你被 cron 定时拉起，需要独立完成一次完整的 7+1 专家团深度分析。
-执行标准是 invest-skill 的标准管线（prepare_prompts → run_experts → run_challenges → 裁判长 → assemble_report），
+执行标准是 invest-skill 的标准管线（prepare_prompts → host-native 子代理专家/质询 → 裁判长 → assemble_report），
 禁止用「单会话内扮演全部专家」的方式替代——那会破坏专家之间的认知隔离，产出无效报告。
 
-### Step 0：选股
+### Step 0：选股（⛔ 已由外层完成，禁止重复）
 
-1. 用 Python 读取 data/stock_pool.json（全 A 股池），过滤：
-   - 排除 688 开头（科创板）
-   - 排除 8 开头（北交所）
-   - 排除名称含 ST 的股票
-   ```python
-   import json
-   pool = json.load(open('data/stock_pool.json'))
-   valid = [s for s in pool if not s['ts_code'].startswith('688') and not s['ts_code'].startswith('8') and 'ST' not in s.get('name','')]
-   ```
-
-2. 读取 data/auto_state.json，获取 `next_index` 和 `last_analyzed` 映射
-
-3. 从 valid[next_index] 开始，找到第一只满足条件的股票：
-   - 该股票的 ts_code 不在 `last_analyzed` 中，或距今 > 5 天
-   - 如果当前 next_index 指向的股票 5 天内已分析过，next_index += 1 继续找
-   - 找到后记录 code = 该股票的 ts_code、name = 公司名
-
-4. 如果 next_index 超出 valid 长度，从 0 循环
+外层 `cron_trigger.sh` 已选好标的（前置状态中的「已选中标的」即本次分析对象）。
+**禁止读取 `data/stock_pool.json`**（该文件已废弃，选股已改为读 SQLite `stocks` 表），
+禁止自行改选或轮换其他股票。直接从 Step 0.5 开始。
 
 ### Step 0.5：断点检查（⛔ 先做这步，避免重复劳动）
 
 上一次运行可能在专家分析完成后中断。按顺序检查：
 
-1. `/tmp/invest_data_<code>.json` 存在且 `market.trade_date` 是最近 5 天内，且
+1. `${INVEST_RUNTIME_DIR:-${INVEST_SKILL_HOME}}/invest_data_<code>.json` 存在且 `market.trade_date` 是最近 5 天内，且
    `python3 scripts/collect_results.py <code> --check` 输出 7/7 通过
    且 `python3 scripts/collect_challenges.py <code>` 通过
    → 说明数据、7 份专家结果与 7 份质询都已就绪，**直接跳到 Step 5**（裁判长裁决）
@@ -56,27 +41,32 @@ market 验证通过后立即进入 Step 2；不要在 Step 1 预先重复执行 
 ### Step 2：生成专家 prompt（⛔ 硬失败点）
 
 ```bash
-python3 scripts/prepare_prompts.py <code>
+python3 scripts/prepare_prompts.py <code> --include-semiannual --semi-years 2
 ```
 
-- 该步骤会拉取全部财务数据 + 最近 5 年年报文本（首次需从巨潮下载，耗时几分钟，正常）
+- 该步骤会拉取结构化财务数据，并调用独立 report-wiki 物化最近 5 年年度报告；已有语料直接复用，缺少时由 report-wiki 下载和编译
 - **exit != 0 → 本次分析失败**：记录活动日志后退出：
   `source scripts/activity_log.sh && log_activity prompt <code> <name> failure "prepare_prompts失败"`
 - ⛔ 禁止在数据/年报缺失时继续；⛔ 禁止写「数据 N/A」的报告；⛔ 禁止更新 auto_state.json
 
-**执行检查点**：prepare_prompts 成功后，**立即**执行 Step 3 的 `run_experts.sh --no-prepare`，禁止停顿、禁止总结、禁止过渡语。
+**执行检查点**：prepare_prompts 成功后，立即执行 Step 3 的 host-native 计划；禁止调用 `run_experts.sh` 或另启其他产品 CLI。
 
 ### Step 3：独立专家分析（⛔ 硬失败点）
 
 ```bash
-bash scripts/run_experts.sh <code> --no-prepare
+python3 scripts/native_agent_tasks.py begin experts <code>
 ```
 
-- 这会并行启动 7 个独立 agent 进程，全程约 30-45 分钟，正常
-- 失败时幂等重试一次：`bash scripts/run_experts.sh <code> --no-prepare --retry`
-- 重试仍失败 → 记录 failure 并退出（同样禁止写报告、禁止更新状态）
+- 读取 JSON `jobs[]`，用**当前主 agent 的原生子代理工具**并行启动 7 个独立子代理；
+  不得传 provider/model 覆盖，不得启动嵌套 `dsh`、`codex`、`claude` 或其他外部 CLI；当前 headless 会话本身就是生产 host-native DSH 宿主。
+- 每个子代理只执行 `jobs[].instruction` 并写 staging；完成后逐项执行
+  `python3 scripts/native_agent_tasks.py commit experts <code> <job-id> --child-id <host-child-id>`；禁止在 `jobs[].instruction` 外追加任何语义指令。
+- 全部 commit 后执行 `python3 scripts/native_agent_tasks.py advance experts <code>`。
+  `PASS` 才继续；`FAIL` 时按 `next` 用 `begin experts <code> --retry` 启动唯一重试；
+  `CONTINUE` 时仅执行返回的新 jobs 并重复 commit/advance。
+- 宿主没有原生子代理能力时必须在模型调用前 `CRON_FAIL`，绝不 fallback 到其他产品。
 
-**执行检查点**：run_experts 成功后（exit 0），**立即**执行 Step 4 的 `collect_results.py --check`，不要等待、不要总结。
+**执行检查点**：advance 返回 PASS 后，立即执行 Step 4 的 `collect_results.py --check`。
 
 ### Step 4：校验
 
@@ -86,29 +76,31 @@ python3 scripts/collect_results.py <code> --check
 
 必须 7/7 通过，否则回到 Step 3 的 --retry 路径（最多一次）。
 
-**执行检查点**：7/7 通过后，**立即**执行 Step 4.5 二级质询；校验失败则最多重试一次 run_experts --retry，重试仍失败则输出 `CRON_FAIL` 并退出。
+**执行检查点**：7/7 通过后立即执行 Step 4.5；校验失败按 native `begin experts --retry` 唯一重试，仍失败则 `CRON_FAIL`。
 
 ### Step 4.5：二级魔鬼代言人质询（⛔ 硬失败点）
 
 ```bash
-bash scripts/run_challenges.sh <code>
+python3 scripts/native_agent_tasks.py begin challenges <code>
 ```
 
-必须 7/7 通过 `collect_challenges.py`；失败时只允许 `bash scripts/run_challenges.sh <code> --retry` 一次。重试仍失败则输出 `CRON_FAIL`，禁止生成草稿。
+仍使用当前主 agent 的原生子代理且不覆盖 provider/model。按 jobs[] 原样并行委派，逐项
+`commit challenges <code> <job-id> --child-id <host-child-id>`，最后 `advance challenges`。失败时只允许一次
+`begin challenges <code> --retry`；重试仍失败则 `CRON_FAIL`，禁止生成草稿。
 
 **执行检查点**：质询 7/7 通过后，立即进入 Step 5 裁判长裁决。
 
 ### Step 5：裁判长综合裁决（你的核心认知工作）
 
 按 SKILL.md 第六步执行：
-1. 读 wiki 规则（路径基于 skill 目录的上一级，绝对路径示例：
-   `/home/bazinga/invest-wiki/04_stock-analysis-expert/adjudicator/裁判长-多框架裁判规则.md`，
-   以及同目录下的 `index.md`；不同机器上把 `/home/bazinga` 换成实际路径）；
+1. 读本 skill 的裁判规则与准出契约，并通过
+   `sage-wiki query --scope local --project /home/bazinga/invest-sage --format json` 查询
+   估值、护城河、成长、周期和治理知识；不同机器上把 `/home/bazinga` 换成实际路径；
    案例库（案例库-裁判先例.md）如存在则参照，不存在则标注「无先例可参照」
-2. 通读全部 7 份 `/tmp/invest_result_<code>_*.md`（不是只看 frontmatter 分数）
+2. 通读全部 7 份 `${INVEST_RUNTIME_DIR:-${INVEST_SKILL_HOME}}/invest_result_<code>_*.md`（不是只看 frontmatter 分数）
 3. 按 wiki 规则裁决：先查一票否决 → 处理框架冲突 → 给出评级 + 仓位 + 理由 + 分歧 + 观察指标
 
-**执行检查点**：裁决完成后，**立即**执行 Step 6 的 `assemble_report.py` 生成草稿、写入裁决与自评审，再通过门禁定稿，不要停顿。
+**执行检查点**：裁决完成后，**立即**执行 Step 6 的 `assemble_report.py` 生成草稿、写入 hash-bound 裁决与裁判自检，再通过机器 receipt 门禁定稿，不要停顿。
 
 ### Step 6：生成报告
 
@@ -116,31 +108,29 @@ bash scripts/run_challenges.sh <code>
 python3 scripts/assemble_report.py <code> --name <公司名>
 ```
 
-- 如果组装提示第三级已触发，立即执行 `bash scripts/run_cross_reviews.sh <code>`（失败时只允许 `--retry` 一次），通过后重新生成草稿。
+- 如果组装提示第三级已触发，立即用 `native_agent_tasks.py begin cross-reviews <code>` 生成计划，以当前主 agent 原生子代理原样执行，逐项 `commit ... --child-id <host-child-id>` 后 advance；失败时只允许 native `--retry` 一次，通过后重新生成草稿。
 
 - 将 Step 5 的裁决书写入草稿（裁决 yaml、裁决理由、一行总评、知识索引）
-- 按 Step 7 完成结构化自评审并写入草稿；不得先定稿后补评审
+- 按 Step 7 完成裁判自检与 hash-bound `knowledge_refs`；自检不打分、不冒充独立复核
 - 然后定稿：`python3 scripts/assemble_report.py <code> --name <公司名> --finalize`
-- `--finalize` 会重新校验专家契约、必检项、数据溯源、自评审，并归档同批次证据；任一失败即停止
+- `--finalize` 会重新校验冻结控制面、专家契约、必检项、数据溯源与裁决语义，严格验证注入 manifest 标记后的最终字节，并生成 adjudication/verification/publication receipts；任一失败即停止
 
-**执行检查点**：草稿完成后，**立即**执行 Step 7 自评审；自评审写回草稿后才允许 `--finalize`。
+**执行检查点**：草稿完成后，立即执行 Step 7；写回裁判块后才允许 `--finalize`。
 
-### Step 7：结构化自评审
+### Step 7：裁判自检（非独立复核）
 
-按 SKILL.md 第八步执行（四维度扣分制，总分 90）。
-≥ 72 分且事实核查 PASS 才准出，把评审结论附加到草稿末尾；< 72 分修正后重评。
-自评审章节必须包含独立行 `**总分：XX / 90**`（XX 只能为 72-90）和独立行 `**判定：PASS**`；包含 PASS 的其他单词不能替代判定行。
+确认冲突登记、非中性质询影响、知识上下文 `{path, sha256}`、现有持仓动作、新增仓位与总仓位上限均完整。不要编造 90 分自评分；准出只认机器 strict receipt、publication receipt 与外层 `verify_manifest.py`。
 
-**执行检查点**：自评审完成后，执行 `--finalize`；只有定稿命令 exit 0 才能输出 Step 10 完成标记。状态更新由外层 cron_trigger.sh 在独立复核后执行。
+**执行检查点**：完成后执行 `--finalize`；只有定稿命令 exit 0 才能输出 Step 10 完成标记。状态更新由外层 cron_trigger.sh 在独立复核后执行。
 
 ### Step 8：更新状态（由外层 cron_trigger.sh 执行）
 
-agent 会话不得直接更新。外层脚本在再次运行 `verify_report.py --strict` 成功后更新 data/auto_state.json：
+agent 会话不得直接更新。外层脚本在再次运行 `verify_report.py --strict` 成功后更新运行时根的 `data/auto_state.json`（`${INVEST_SKILL_HOME}/data/auto_state.json`）：
 - `last_analyzed[code]` = 当天日期（ISO 格式）
 - `next_index` = 当前 index + 1（循环则取模）
 - `history` 数组追加：`{ts_code, name, date, rating, score}`
 
-并记录活动日志（供 21:00 Hermes 推送与监控消费）：
+并记录活动日志（供 07:30 Hermes 推送与监控消费）：
 `source scripts/activity_log.sh && log_activity report <code> <name> success "<rating> <score>分"`
 
 **执行检查点**：agent 会话跳过本步。
@@ -170,7 +160,8 @@ CRON_FAIL <code> <原因一句话>
 - ⛔ 任何硬失败点失败 → 记录 failure 后退出，**不产出报告、不更新 auto_state.json**
   （失败的股票下次 cron 会被重新选中，好过留下一份假报告占位 5 天）
 - ⛔ 禁止使用 company-analysis/analyze_company.py 的模板报告流程（已废弃）
-- ⛔ 禁止在单会话内扮演 7 位专家——专家分析只能由 run_experts.sh 的独立进程完成
+- ⛔ 禁止主会话扮演 7 位专家；必须用当前宿主的原生子代理，且不指定/切换 provider 或 model
+- ⛔ 生产路径禁止自动调用 `run_experts.sh`、`run_challenges.sh`、Codex CLI、Claude CLI 或嵌套 DSH；这些脚本仅保留给用户明确启用的兼容路径。宿主无原生子代理能力就 fail-closed
 - 评分只能基于 data_tools 实际取到的数据和年报文本，禁止编造
 - ⛔ 禁止中途停止：从 Step 0 到 Step 10 必须一口气做完。token 预算充足，
   禁止以「进入下一步」「接下来将…」等过渡语作为会话的最后一条消息

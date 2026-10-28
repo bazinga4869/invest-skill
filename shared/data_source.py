@@ -9,10 +9,10 @@
 3. 返回的 DataFrame 列名尽量与 Tushare 保持一致，便于下游统一处理
 """
 
-import os, sys, json, subprocess
+import os
+import sys
 import time
 import logging
-import re
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta
 from typing import Optional
@@ -128,28 +128,6 @@ class DataSource(ABC):
         """获取业绩预告数据。返回字段：ts_code, ann_date, end_date, type, p_change_min,
         p_change_max, net_profit_min, net_profit_max, last_parent_net, summary, change_reason"""
         pass
-
-    @abstractmethod
-    def get_annual_report_text(self, ts_code: str, report_year: str) -> dict:
-        """获取年报/半年报/季报文本。
-        返回结构化 dict：
-        {
-            "ts_code": "002444.SZ",
-            "report_year": "2024",
-            "report_type": "annual",
-            "ann_date": "20240427",
-            "title": "2024年年度报告",
-            "source_url": "...",
-            "sections": {
-                "经营情况讨论与分析": "...",
-                "核心竞争力分析": "...",
-                "公司未来发展的展望": "...",
-                "可能面对的风险": "...",
-                "募集资金使用": "..."
-            },
-            "full_text": "..."
-        }
-        """
 
     @abstractmethod
     def get_macro_data(self) -> dict:
@@ -386,11 +364,6 @@ class TushareDataSource(DataSource):
             _safe(key, fn)
 
         return result
-
-    def get_annual_report_text(self, ts_code: str, report_year: str) -> dict:
-        """Tushare 暂不直接提供年报全文，抛出异常让 fallback 到 AKShare 处理。"""
-        raise NotImplementedError("Tushare 数据源不支持年报全文抓取，请使用 AKShare 备用源")
-
 
 # ---------------------------------------------------------------------------
 # AKShare 数据源（备用）
@@ -867,321 +840,18 @@ class AKShareDataSource(DataSource):
 
         return result
 
-    def get_annual_report_text(self, ts_code: str, report_year: str) -> dict:
-        """
-        通过巨潮资讯网 API 获取年报/半年报/三季报 PDF，解析为结构化文本。
-        返回 dict，包含 sections 和 full_text。
-        """
-        symbol = self._symbol(ts_code)
-        exchange = "sh" if ts_code.endswith(".SH") else "sz"
-        column = "sse" if exchange == "sh" else "szse"
-
-        # 分类映射：年报、半年报、三季报、一季报
-        category_map = {
-            "annual": "category_ndbg_szsh",
-            "semi-annual": "category_bndbg_szsh",
-            "q3": "category_sjdbg_szsh",
-            "q1": "category_yjdbg_szsh",
-        }
-
-        import requests
-        import io
-        import pdfplumber
-        from datetime import datetime
-
-        # 获取 orgId
-        # 巨潮 orgId 规则：gs + 交易所代码(sh/sz) + 股票代码补零到7位
-        # 例：平安银行 gssz0000001(000001)、福耀玻璃 gssh0060060(600660)
-        # 注意：sse_stock.json 接口已失效(404)，直接按规则构造，无需请求列表API
-        padded_symbol = symbol.zfill(7)
-        org_id = f"gs{exchange}{padded_symbol}"
-        try:
-            stock_json_url = f"http://www.cninfo.com.cn/new/data/{column}_stock.json"
-            r = requests.get(stock_json_url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-            if r.status_code == 200:
-                stock_list = r.json().get("stockList", [])
-                for item in stock_list:
-                    if item.get("code") == symbol:
-                        org_id = item.get("orgId") or org_id
-                        break
-        except Exception as e:
-            logger.warning(f"AKShare 获取 orgId 失败 {ts_code}: {e}，使用规则构造 {org_id}")
-
-        stock_item = f"{symbol},{org_id}"
-        start = f"{report_year}-01-01"
-        end = f"{report_year}-12-31"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-            "X-Requested-With": "XMLHttpRequest",
-        }
-        base_api = "http://www.cninfo.com.cn/new/hisAnnouncement/query"
-
-        def fetch_pdf(category_key: str) -> dict:
-            cat = category_map.get(category_key)
-            if not cat:
-                return {}
-            payload = {
-                "pageNum": "1",
-                "pageSize": "30",
-                "column": column,
-                "tabName": "fulltext",
-                "plate": "",
-                "stock": stock_item,
-                "searchkey": "",
-                "secid": "",
-                "category": cat,
-                "trade": "",
-                "seDate": f"{start}~{end}",
-                "sortName": "",
-                "sortType": "",
-                "isHLtitle": "true",
-            }
-            try:
-                r = requests.post(base_api, data=payload, headers=headers, timeout=20)
-                data = r.json()
-                anns = data.get("announcements") or []
-                if not anns:
-                    return {}
-                # 选择中文版：跳过标题含 "英文版" / "英文" / "English" 的公告
-                selected_ann = None
-                for ann in anns:
-                    title = ann.get("announcementTitle", "")
-                    if any(k in title for k in ["英文版", "英文", "English"]):
-                        continue
-                    selected_ann = ann
-                    break
-                # 如果全是英文版，则取第一条
-                if selected_ann is None:
-                    selected_ann = anns[0]
-                ann = selected_ann
-                adjunct = ann.get("adjunctUrl", "")
-                if not adjunct:
-                    return {}
-                pdf_url = f"http://static.cninfo.com.cn/{adjunct}"
-                pdf_resp = requests.get(pdf_url, headers={"User-Agent": headers["User-Agent"]}, timeout=30)
-                if pdf_resp.status_code != 200:
-                    return {}
-                # 解析 PDF
-                text_parts = []
-                with pdfplumber.open(io.BytesIO(pdf_resp.content)) as pdf:
-                    for page in pdf.pages:
-                        txt = page.extract_text()
-                        if txt:
-                            text_parts.append(txt)
-                full_text = "\n".join(text_parts)
-                # 公告时间处理（毫秒时间戳）
-                ann_time = ann.get("announcementTime", "")
-                try:
-                    ann_date = datetime.fromtimestamp(int(ann_time) / 1000).strftime("%Y%m%d")
-                except Exception:
-                    ann_date = str(ann_time)[:10].replace("-", "")
-                return {
-                    "ann_date": ann_date,
-                    "title": ann.get("announcementTitle", ""),
-                    "source_url": pdf_url,
-                    "full_text": full_text,
-                    "sections": self._split_report_sections(full_text),
-                }
-            except Exception as e:
-                logger.warning(f"AKShare 年报抓取失败 {ts_code} {report_year} {category_key}: {e}")
-                return {}
-
-        # 优先获取年报，其次半年报、三季报、一季报
-        result = {"ts_code": ts_code, "report_year": report_year, "reports": {}}
-        for cat_key in ["annual", "semi-annual", "q3", "q1"]:
-            data = fetch_pdf(cat_key)
-            if data:
-                result["reports"][cat_key] = data
-        return result
-
-    @staticmethod
-    def _split_report_sections(text: str) -> dict:
-        """
-        按常见年报章节标题拆分文本。返回 {章节名: 内容}。
-        支持 "第X节 章节名"、"X、章节名"、单独一行 "章节名" 等多种形式。
-        """
-        if not text:
-            return {}
-
-        # 关键章节关键词，按年报常见顺序
-        key_sections = [
-            ("重要提示、目录和释义", ["重要提示", "目录和释义"]),
-            ("公司简介和主要财务指标", ["公司简介和主要财务指标", "公司基本情况", "主要会计数据和财务指标"]),
-            ("管理层讨论与分析", ["管理层讨论与分析", "经营情况讨论与分析", "管理层讨论与分析"]),
-            ("公司治理", ["公司治理", "股东大会情况"]),
-            ("环境和社会责任", ["环境和社会责任", "社会责任", "环境保护"]),
-            ("重要事项", ["重要事项", "重大事项"]),
-            ("股份变动及股东情况", ["股份变动及股东情况", "股东和实际控制人情况"]),
-            ("债券相关情况", ["债券相关情况", "公司债券"]),
-            ("财务报告", ["财务报告", "审计报告", "合并资产负债表"]),
-        ]
-
-        # 构造正则：匹配 "第N节 章节名" 或 "N、章节名" 或单独 "章节名"（作为一行开头）
-        patterns = []
-        for sec_name, aliases in key_sections:
-            alias_pattern = "|".join(re.escape(a) for a in aliases)
-            # 形式1: 第[一二三四五六七八九十\d]+节\s*(章节名)
-            # 形式2: [一二三四五六七八九十\d]+[、.．]\s*(章节名)
-            # 形式3: 行首单独出现章节名
-            pattern = (
-                f"(?:"
-                f"第[一二三四五六七八九十\\d]+[节章]\\s*({alias_pattern})"
-                f"|[一二三四五六七八九十\\d]+[、.．\\s]+({alias_pattern})"
-                f"|^[\\s]*({alias_pattern})[\\s]*$"
-                f")"
-            )
-            patterns.append((sec_name, re.compile(pattern, re.MULTILINE)))
-
-        # 找到每个章节的起始位置
-        positions = []
-        for sec_name, regex in patterns:
-            for m in regex.finditer(text):
-                positions.append((m.start(), sec_name))
-                break  # 每个章节只取第一次出现
-
-        if not positions:
-            return {"全文": text}
-
-        positions.sort()
-
-        # 提取章节内容
-        sections = {}
-        for i, (start, sec_name) in enumerate(positions):
-            end = positions[i + 1][0] if i + 1 < len(positions) else len(text)
-            sections[sec_name] = text[start:end].strip()
-
-        return sections
-
-
 # ---------------------------------------------------------------------------
 # 自动回退数据源
 # ---------------------------------------------------------------------------
-
-
-class CacheDataSource(DataSource):
-    """
-    本地缓存 + 浏览器下载的年报数据源（第三源）。
-    1. 检查 ~/企业年报/{code6}/{year}_{code6}_annual_sections.json
-    2. 有则直接返回
-    3. 无则调用 cninfo-annual skill 的 fetch.py 下载
-    """
-    name = "cache"
-
-    SKILL_DIR = os.path.expanduser("~/.codex/skills/cninfo-annual/scripts")
-    ANNUAL_DIR = os.path.expanduser("~/企业年报")
-    PLAYWRIGHT_PATH = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/tmp/pw-browsers")
-
-    def __init__(self):
-        self.skill_script = os.path.join(self.SKILL_DIR, "fetch.py")
-
-    @staticmethod
-    def code6(ts_code: str) -> str:
-        c = ts_code.upper().strip()
-        if c.endswith(".SH") or c.endswith(".SZ") or c.endswith(".BJ"):
-            return c[:6]
-        if len(c) == 6 and c.isdigit():
-            return c
-        raise ValueError(f"无法识别的股票代码: {ts_code}")
-
-    def get_annual_report_text(self, ts_code: str, report_year: str) -> dict:
-        code6 = self.code6(ts_code)
-        target = os.path.join(self.ANNUAL_DIR, code6)
-        json_path = os.path.join(target, f"{report_year}_{code6}_annual_sections.json")
-        pdf_path = os.path.join(target, f"{report_year}_{code6}_annual_report.pdf")
-
-        if not os.path.exists(json_path):
-            self._download(code6, report_year)
-            if not os.path.exists(json_path):
-                raise RuntimeError(f"年报下载后仍不可得: {ts_code} {report_year}")
-
-        with open(json_path, "r", encoding="utf-8") as f:
-            sec_data = json.load(f)
-
-        full_text = ""
-        if os.path.exists(pdf_path):
-            try:
-                import pdfplumber
-                with pdfplumber.open(pdf_path) as pdf:
-                    full_text = "\n".join(p.extract_text() or "" for p in pdf.pages)
-            except Exception:
-                pass
-
-        key_map = {
-            "management_discussion": "经营情况讨论与分析",
-            "core_competitiveness": "核心竞争力分析",
-            "future_risks": "可能面对的风险",
-            "corporate_governance": "公司治理",
-            "shareholder_info": "股份变动及股东情况",
-        }
-        sections = {}
-        for eng, chn in key_map.items():
-            txt = sec_data.get(eng, "")
-            if txt:
-                sections[chn] = txt
-        if not sections and len(full_text.strip()) >= 1000:
-            sections["全文"] = full_text
-        sections = {
-            name: text for name, text in sections.items()
-            if isinstance(text, str) and len(text.strip()) >= 200
-        }
-        if not sections:
-            raise RuntimeError(f"缓存年报只有元数据或占位文本，正文不可用: {ts_code} {report_year}")
-
-        return {
-            "ts_code": ts_code,
-            "report_year": report_year,
-            "reports": {
-                "annual": {
-                    # 缓存文件没有可靠公告日时保持空值，禁止伪造日期。
-                    "ann_date": "",
-                    "title": f"{report_year}年年度报告",
-                    "source_url": f"file://{pdf_path}" if os.path.exists(pdf_path) else "",
-                    "full_text": full_text,
-                    "sections": sections,
-                }
-            },
-        }
-
-    def _download(self, code6: str, report_year: str):
-        if not os.path.exists(self.skill_script):
-            logger.warning(f"cninfo-annual skill 脚本未找到: {self.skill_script}")
-            return
-        env = os.environ.copy()
-        env["PLAYWRIGHT_BROWSERS_PATH"] = self.PLAYWRIGHT_PATH
-        try:
-            r = subprocess.run(
-                [sys.executable, self.skill_script, code6, "--years", report_year, "--force"],
-                capture_output=True, text=True, timeout=120, env=env,
-            )
-            if r.returncode != 0:
-                logger.warning(f"cninfo-annual 下载失败: {r.stderr[:500]}")
-        except Exception as e:
-            logger.warning(f"cninfo-annual 执行异常: {e}")
-
-    def get_stock_basic(self, ts_code): raise NotImplementedError
-    def get_all_stocks(self): raise NotImplementedError
-    def get_daily_quotes(self, ts_code, start, end): raise NotImplementedError
-    def get_daily_basic(self, ts_code, start, end): raise NotImplementedError
-    def get_income(self, ts_code, start, end): raise NotImplementedError
-    def get_balance(self, ts_code, start, end): raise NotImplementedError
-    def get_cashflow(self, ts_code, start, end): raise NotImplementedError
-    def get_fina_indicator(self, ts_code, start, end): raise NotImplementedError
-    def get_fina_audit(self, ts_code, start, end): raise NotImplementedError
-    def get_forecast(self, ts_code, start, end): raise NotImplementedError
-    def get_macro_data(self): raise NotImplementedError
-
 
 class FallbackDataSource(DataSource):
     """先尝试主源，失败或返回空时自动切换到备用源。"""
 
     name = "fallback"
 
-    def __init__(self, primary: DataSource, fallback: Optional[DataSource] = None,
-                 cache: Optional[DataSource] = None):
+    def __init__(self, primary: DataSource, fallback: Optional[DataSource] = None):
         self.primary = primary
         self.fallback = fallback
-        self.cache = cache
 
     def _fetch(self, method: str, ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         try:
@@ -1301,37 +971,6 @@ class FallbackDataSource(DataSource):
         # 两个源都失败，返回空结果
         return {"update_date": "", "source": "none", "indicators": {}, "errors": ["所有数据源均失败"]}
 
-    def get_annual_report_text(self, ts_code: str, report_year: str) -> dict:
-        """年报全文抓取：主源→备用源→缓存源（三源依次回退）。"""
-        try:
-            result = self.primary.get_annual_report_text(ts_code, report_year)
-            if result and result.get("reports"):
-                logger.info(f"[get_annual_report_text] 主源 {self.primary.name} 成功")
-                return result
-        except Exception as e:
-            logger.warning(f"[get_annual_report_text] 主源 {self.primary.name} 失败: {e}")
-
-        if self.fallback is not None:
-            try:
-                result = self.fallback.get_annual_report_text(ts_code, report_year)
-                if result and result.get("reports"):
-                    logger.info(f"[get_annual_report_text] 备用源 {self.fallback.name} 成功")
-                    return result
-            except Exception as e:
-                logger.warning(f"[get_annual_report_text] 备用源 {self.fallback.name} 失败: {e}")
-
-        if self.cache is not None:
-            try:
-                result = self.cache.get_annual_report_text(ts_code, report_year)
-                if result and result.get("reports"):
-                    logger.info(f"[get_annual_report_text] 缓存源 {self.cache.name} 成功")
-                    return result
-            except Exception as e:
-                logger.warning(f"[get_annual_report_text] 缓存源 {self.cache.name} 失败: {e}")
-
-        raise RuntimeError(f"[get_annual_report_text] 所有数据源均失败: {ts_code} {report_year}")
-
-
 # ---------------------------------------------------------------------------
 # 工厂函数
 # ---------------------------------------------------------------------------
@@ -1372,14 +1011,6 @@ def create_data_source(config: dict) -> DataSource:
     if primary is None:
         raise RuntimeError("没有可用数据源：主源与备用源均初始化失败")
 
-    cache = None
-    cache_script = os.path.expanduser("~/.codex/skills/cninfo-annual/scripts/fetch.py")
-    if os.path.exists(cache_script):
-        try:
-            cache = CacheDataSource()
-            logger.info("[create_data_source] CacheDataSource 初始化成功")
-        except Exception as e:
-            logger.warning(f"[create_data_source] CacheDataSource 初始化失败: {e}")
-    if fallback or cache:
-        return FallbackDataSource(primary=primary, fallback=fallback, cache=cache)
+    if fallback:
+        return FallbackDataSource(primary=primary, fallback=fallback)
     return primary

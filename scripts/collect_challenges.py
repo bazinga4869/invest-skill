@@ -16,13 +16,14 @@ sys.path.insert(0, str(SKILL_ROOT))
 from scripts.collect_results import expected_batch_id, expected_data_date
 from shared.contracts import normalize_ts_code
 from shared.review_contracts import challenge_prompt_hash
+from shared.runtime import RUNTIME_ROOT
 
 EXPERTS = [item["id"] for item in json.loads(
     (SKILL_ROOT / "data" / "experts.json").read_text(encoding="utf-8")
 )["experts"]]
 
 
-def validate_challenge(code: str, expert_id: str, base_dir: Path = Path("/tmp")) -> list[str]:
+def validate_challenge(code: str, expert_id: str, base_dir: Path = RUNTIME_ROOT) -> list[str]:
     problems = []
     prompt_path = base_dir / f"invest_challenge_prompt_{code}_{expert_id}.txt"
     result_path = base_dir / f"invest_challenge_result_{code}_{expert_id}.md"
@@ -82,13 +83,23 @@ def validate_challenge(code: str, expert_id: str, base_dir: Path = Path("/tmp"))
     if len(prompt_questions) != 3 or actual_question_lines != expected_question_lines:
         problems.append("未逐字保留 3 个质询问题")
     response_match = re.search(
-        r'^## 合并回应（150-300 个中文字符）\s*$\n+(.*?)(?=^##\s+|\Z)',
+        r'^## 合并回应（180-360 个中文字符）\s*$\n+(.*?)(?=^##\s+|\Z)',
         result, re.MULTILINE | re.DOTALL,
     )
     response = response_match.group(1).strip() if response_match else ""
     cjk_count = len(re.findall(r'[\u4e00-\u9fff]', response))
-    if not 150 <= cjk_count <= 300:
-        problems.append(f"合并回应中文字符数 {cjk_count}，要求 150-300")
+    if not 180 <= cjk_count <= 360:
+        problems.append(f"合并回应中文字符数 {cjk_count}，要求 180-360")
+    semantic_requirements = {
+        "未正面回应不利情景": r"不利|压力|恶化|风险|反转|失效",
+        "未说明结论是否改变": r"结论|评分|score|verdict|维持|下调|上调|改变",
+        "未给出可证伪数据": r"证伪|数据|指标|证据|披露|跟踪",
+    }
+    for message, pattern in semantic_requirements.items():
+        if response and not re.search(pattern, response, re.IGNORECASE):
+            problems.append(message)
+    if re.search(r'\d|%', response):
+        problems.append("质询回应含阿拉伯数字或百分号；必须定性回指题设和原报告")
     if re.search(r'\[(?:source|calc):', response, re.IGNORECASE):
         problems.append("质询回应不得新增数字引用；应回指原报告")
     return problems

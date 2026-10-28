@@ -9,15 +9,39 @@
 #   bash scripts/daily_analysis.sh --dry-run    # 只打印要分析的股票，不执行
 # ============================================================
 set -euo pipefail
+umask 077
 
 # --- 活动日志 ---
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_ROOT="$(dirname "$SCRIPT_DIR")"
-POOL_FILE="$SKILL_ROOT/config/stocks_pool.txt"
+# cron 环境 PATH 极简（/usr/bin:/bin），补上 CLI 常见安装位置（sage-wiki 等）
+export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"
+# 本机部署配置（DEEPSEEK_API_KEY / INVEST_SKILL_HOME 等）；文件缺失时忽略
+if [[ -f "$HOME/.config/invest-skill.env" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$HOME/.config/invest-skill.env"
+    set +a
+fi
+
+# 运行时根：日志/报告/状态写入调用方 INVEST_SKILL_HOME，不回写 skill 仓库
+RUNTIME_ROOT="${INVEST_SKILL_HOME:-$(cd "$SKILL_ROOT" && python3 -c 'from shared.project_config import runtime_root; print(runtime_root())')}"
+export INVEST_SKILL_HOME="$RUNTIME_ROOT"
+RUNTIME_DIR="${INVEST_RUNTIME_DIR:-$RUNTIME_ROOT}"
+export INVEST_RUNTIME_DIR="$RUNTIME_DIR"
+# 运行时根防护：禁止把运行时产物写回 skill 仓库（INVEST_ALLOW_SKILL_RUNTIME=1 显式逃逸）
+if [[ "$RUNTIME_ROOT" == "$SKILL_ROOT" && "${INVEST_ALLOW_SKILL_RUNTIME:-0}" != "1" ]]; then
+    echo "ERROR: 未设置 INVEST_SKILL_HOME，运行时产物将写回 skill 仓库（违反只读契约）。" >&2
+    echo "       请 export INVEST_SKILL_HOME=<宿主运行时目录>（或 INVEST_ALLOW_SKILL_RUNTIME=1 显式允许）。" >&2
+    exit 2
+fi
+export INVEST_SKILL_HOME="$RUNTIME_ROOT"
+REPORTS_DIR="${INVEST_REPORTS_DIR:-$(cd "$SKILL_ROOT" && python3 -c 'from shared.project_config import configured_path; print(configured_path("invest_tool_dir", "./reports/invest_tool"))')}"
+POOL_FILE="$RUNTIME_ROOT/config/stocks_pool.txt"
 source "$SCRIPT_DIR/activity_log.sh"
-STATE_FILE="$SKILL_ROOT/config/.daily_state"
-LOG_DIR="$SKILL_ROOT/logs"
+STATE_FILE="$RUNTIME_ROOT/config/.daily_state"
+LOG_DIR="${INVEST_LOG_DIR:-$RUNTIME_ROOT/logs}"
 TIMESTAMP=$(date +%Y-%m-%d_%H%M)
 LOG_FILE="$LOG_DIR/daily_${TIMESTAMP}.log"
 SUMMARY_FILE="$LOG_DIR/daily_summary.md"
@@ -57,7 +81,7 @@ pick_stocks() {
 analyze_one() {
     local code="$1"
     local name="$2"
-    local result_file="$SKILL_ROOT/reports/invest_tool/${code}.draft.md"
+    local result_file="$REPORTS_DIR/${code}.draft.md"
 
     log "  ┌─ $code $name ─────────────────"
 
@@ -69,6 +93,15 @@ analyze_one() {
         return 1
     fi
     log_activity "sync" "$code" "$name" "success" "数据同步完成"
+
+    # Step 1.5: report-wiki 语料就绪度门禁（只读、快）。
+    # 未建库股票首次 materialize 需 1-4h（Sage 编译），会烧穿 prepare 的
+    # 3600s 上限并拖垮整批；未就绪时跳过，由 prewarm_corpus.py 晚间预热。
+    if ! python3 "$SKILL_ROOT/scripts/corpus_ready.py" "$code"; then
+        log "  │ ✗ report-wiki 语料未就绪（跳过本只；晚间 prewarm 预热后次日可分析）"
+        log_activity "prepare" "$code" "$name" "skipped" "report-wiki 语料未就绪（缺原件/证据）"
+        return 1
+    fi
 
     # Step 2: 生成 prompt
     log "  │ [2/5] 生成专家 prompt…"
@@ -83,42 +116,13 @@ analyze_one() {
         return 0
     fi
 
-    # Step 3: 执行专家分析（timeout 60 分钟）
-    log "  │ [3/5] 执行 7 位专家…"
-    if timeout 3600 bash "$SKILL_ROOT/scripts/run_experts.sh" "$code" --no-prepare >> "$LOG_FILE" 2>&1; then
-        log "  │ ✓ 专家分析完成"
-        log_activity "expert" "$code" "$name" "success" "7专家分析完成"
-    else
-        local ec=$?
-        if [[ $ec -eq 124 ]]; then
-            log "  │ ⚠ 专家分析超时（60min）"
-        else
-            log "  │ ✗ 专家分析失败 (exit=$ec)"
-        fi
-        return 1
-    fi
-
-    # Step 4: 独立执行二级魔鬼代言人质询。
-    log "  │ [4/5] 执行 7 份二级质询…"
-    if timeout 3600 bash "$SKILL_ROOT/scripts/run_challenges.sh" "$code" >> "$LOG_FILE" 2>&1; then
-        log "  │ ✓ 二级质询完成"
-        log_activity "challenge" "$code" "$name" "success" "7份质询完成"
-    else
-        local ec=$?
-        log "  │ ✗ 二级质询失败 (exit=$ec)"
-        return 1
-    fi
-
-    # Step 5: 生成待裁决草稿。shell 不能替代裁判长认知工作，禁止直接定稿。
-    log "  │ [5/5] 生成待裁决草稿…"
-    if python3 "$SKILL_ROOT/scripts/assemble_report.py" "$code" --name "$name" >> "$LOG_FILE" 2>&1; then
-        log "  └─ ✓ $code $name — 专家结果已组装，待裁判长裁决: $result_file"
-        log_activity "report" "$code" "$name" "skipped" "草稿已生成，待裁判长裁决和发布门禁"
-        return 0
-    else
-        log "  └─ ✗ $code $name — 草稿组装失败（专家结果未通过门禁）"
-        return 1
-    fi
+    # Shell cannot create a child of the *current* host agent.  Never guess a
+    # product CLI here: doing so can silently switch provider/account and waste tokens.
+    log "  │ [3/5] prompt 已就绪；等待当前主 agent 的原生子代理编排"
+    log "  │ 执行入口: python3 scripts/native_agent_tasks.py begin experts $code"
+    log "  └─ ⏸ shell 阶段停止；禁止自动 fallback 到 Codex/Claude/DSH CLI"
+    log_activity "expert" "$code" "$name" "skipped" "等待主 agent 原生子代理编排"
+    return 1
 }
 
 # --- 主流程 ---
@@ -166,7 +170,7 @@ main() {
         echo "$stocks"
         echo '```'
         echo ""
-        echo "报告路径: \`reports/invest_tool/\`"
+        echo "报告路径: \`$REPORTS_DIR/\`"
         echo "日志: \`$LOG_FILE\`"
     } > "$SUMMARY_FILE"
 

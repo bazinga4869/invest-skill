@@ -1,18 +1,19 @@
 # invest-skill
 
-基于 invest-wiki 方法论构建的独立投研工具集。
+基于 invest-sage Sage Wiki 知识检索构建的独立投研工具集。
 
-**重要**：本项目与 invest-wiki 是**两个独立项目**。数据库、报告输出均存放在本项目目录下，不混入 wiki 内容区。
+**重要**：本项目与 invest-sage、invest-report-wiki 是独立项目。数据库、报告输出均存放在本项目目录下，不混入知识库内容区。
 
 ## 项目关系
 
 ```
 /home/bazinga/
-├── invest-wiki/          # 知识库（LLM 维护的 Obsidian wiki）
+├── invest-sage/          # Sage Wiki 投资知识库
 │   ├── 10_meta/公司综合分析 Skill.md
 │   ├── 10_meta/Wiki-Skill 联动规范.md
 │   └── ...
-└── invest-skill/         # 本工程：数据管道 + 分析 skill
+├── invest-report-wiki/   # 公司财报原件、逐页证据与本地 FTS/BM25（Sage 摘要可选）
+└── invest-skill/         # 本工程：结构化数据管道 + 分析 skill
     ├── SKILL.md           # Skill 定义（分析协议、专家团架构）
     ├── shared/            # 数据获取工具
     ├── config.yaml        # 与 wiki 的显式契约
@@ -36,8 +37,9 @@ export TUSHARE_TOKEN="your_token"
 cp .env.example .env
 # 编辑 .env，填入真实 token
 
-# 使用 Claude Code 分析（通过 SKILL.md 定义的协议）
-# 在项目目录下直接说"分析 贵州茅台"即可
+# 使用 DSH 分析（通过 SKILL.md 定义的协议）
+# 在 DSH Web GUI 中让 agent 加载 invest-skill 后说"分析 贵州茅台"即可；
+# 定时分析由宿主 invest-harness 调度（crontab → scripts/cron/cron_daily_analysis.sh → 本工程执行器）
 ```
 
 ### Token 配置说明
@@ -50,11 +52,17 @@ cp .env.example .env
 
 ## 核心设计
 
-1. **解耦**：不依赖 wiki 内部文件路径，通过 `config.yaml` 声明 wiki 依赖和方法论引用
+1. **显式依赖**：数据库、报告目录和 wiki 根路径由 `config.yaml` 统一解析
 2. **自包含**：`schema.sql`、`config.yaml`、数据目录、报告目录都在本项目中
 3. **数据源抽象**：`shared/data_source.py` 实现 Tushare 主源 + AKShare 备用源，主源失败自动回退
-4. **联动检查**：运行前校验 wiki 依赖页面是否存在；变更时生成 `data/wiki_drift_report.json`
-5. **可量化**：6 维度 0~100 打分，输出明确评级
+4. **批次绑定**：数据、report-wiki bundle/corpus、年报视图、方法论 wiki 和 prompt 合并生成内容寻址 `batch_id`
+5. **可审计**：7 个专业域 0~100 打分，由裁判长综合，完整证据和执行元数据进入 manifest
+6. **同源子代理**：认知任务只用当前主 agent 的宿主原生子代理，省略 provider/model 覆盖；不自动调用或切换 Codex/Claude/DSH CLI
+
+年报不由本工程临时抓取。`scripts/prepare_prompts.py` 调用
+`../invest-report-wiki/bin/report-wiki materialize`：已有合格语料直接复用，缺少时
+由 report-wiki 下载、建立逐页证据和本地 FTS5/BM25 索引；原件、页码或哈希门禁
+失败会在专家启动前停止。Sage Wiki 只提供方法论上下文并按专家主题缓存，不参与年报证据准出。
 
 ## 数据源
 
@@ -63,7 +71,8 @@ cp .env.example .env
 - **策略**：每次请求先走 Tushare；若失败或返回空，自动切换到 AKShare
 - 所有数据统一清洗为 Tushare 风格列名，下游无感
 
-详见 invest-wiki 中的 [[Wiki-Skill 联动规范]]。
+通用投资知识通过 `sage-wiki query --scope local --project /home/bazinga/invest-sage --format json`
+检索；专家角色和机器门禁仍属于本 skill 的执行契约。
 
 核心原则：
 - wiki 变更方法论页面时，需检查本 skill 是否需要同步更新

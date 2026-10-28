@@ -16,12 +16,15 @@ SKILL_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SKILL_ROOT))
 from shared.contracts import normalize_ts_code
 from shared.review_contracts import cross_prompt_hash
+from shared.runtime import RUNTIME_ROOT
+from scripts.collect_results import trace_data_numbers
+from scripts.verify_report import detect_unsourced, flatten_json
 
 EXPERTS = [item["id"] for item in json.loads(
     (SKILL_ROOT / "data" / "experts.json").read_text(encoding="utf-8")
 )["experts"]]
 CROSS_REVIEWERS = (
-    "financial-auditor", "value-valuator", "cognitive-controller",
+    "blind-reviewer-a", "blind-reviewer-b", "blind-reviewer-c",
 )
 
 
@@ -29,7 +32,7 @@ def sha256_bytes(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-def input_paths(code: str, base_dir: Path = Path("/tmp")) -> list[Path]:
+def input_paths(code: str, base_dir: Path = RUNTIME_ROOT) -> list[Path]:
     return [
         *[base_dir / f"invest_result_{code}_{expert}.md" for expert in EXPERTS],
         *[base_dir / f"invest_challenge_result_{code}_{expert}.md" for expert in EXPERTS],
@@ -37,7 +40,7 @@ def input_paths(code: str, base_dir: Path = Path("/tmp")) -> list[Path]:
     ]
 
 
-def input_bundle_hash(code: str, base_dir: Path = Path("/tmp")) -> str | None:
+def input_bundle_hash(code: str, base_dir: Path = RUNTIME_ROOT) -> str | None:
     paths = input_paths(code, base_dir)
     if not all(path.is_file() for path in paths):
         return None
@@ -51,7 +54,7 @@ def input_bundle_hash(code: str, base_dir: Path = Path("/tmp")) -> str | None:
 
 
 def validate_cross_review(code: str, reviewer: str,
-                          base_dir: Path = Path("/tmp")) -> list[str]:
+                          base_dir: Path = RUNTIME_ROOT) -> list[str]:
     problems = []
     prompt_path = base_dir / f"invest_cross_prompt_{code}_{reviewer}.txt"
     result_path = base_dir / f"invest_cross_result_{code}_{reviewer}.md"
@@ -97,10 +100,21 @@ def validate_cross_review(code: str, reviewer: str,
     for heading in ("## 遗漏与矛盾", "## 反事实压力测试", "## 对裁判长的影响"):
         if text.count(heading) != 1:
             problems.append(f"缺少或重复章节: {heading}")
+    checked = trace_data_numbers(text, flatten_json(data))
+    untraced = [item for item in checked if item["trace_status"] == "UNTRACED"]
+    if untraced:
+        samples = [f"L{item['line']}:{item['raw']}" for item in untraced[:8]]
+        problems.append(f"存在 {len(untraced)} 个未精确溯源数字: {samples}")
+    unsupported = detect_unsourced(text, flatten_json(data))
+    if unsupported:
+        problems.append(
+            "存在未充分核对的行业/历史断言: "
+            + str([f"L{item['line']}:{item['reason']}" for item in unsupported[:8]])
+        )
     return problems
 
 
-def build_aggregate(code: str, base_dir: Path = Path("/tmp")) -> str:
+def build_aggregate(code: str, base_dir: Path = RUNTIME_ROOT) -> str:
     data = json.loads((base_dir / f"invest_data_{code}.json").read_text(encoding="utf-8"))
     level3_path = base_dir / f"invest_level3_{code}.json"
     level3_hash = sha256_bytes(level3_path.read_bytes())
@@ -124,7 +138,7 @@ def build_aggregate(code: str, base_dir: Path = Path("/tmp")) -> str:
     return "".join(parts)
 
 
-def validate_cross_aggregate(code: str, base_dir: Path = Path("/tmp")) -> list[str]:
+def validate_cross_aggregate(code: str, base_dir: Path = RUNTIME_ROOT) -> list[str]:
     problems = []
     aggregate = base_dir / f"invest_cross_blind_{code}.md"
     if not aggregate.is_file():
@@ -177,7 +191,7 @@ def main() -> int:
         print("\n".join(failing))
     if failing:
         return 1
-    aggregate_path = Path(f"/tmp/invest_cross_blind_{code}.md")
+    aggregate_path = RUNTIME_ROOT / f"invest_cross_blind_{code}.md"
     write_durable(aggregate_path, build_aggregate(code))
     if not args.failing:
         print(f"✓ 三方交叉盲审已聚合: {aggregate_path}")

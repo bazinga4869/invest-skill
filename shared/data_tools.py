@@ -27,6 +27,7 @@
 import argparse
 import json
 import math
+import os
 import sys
 import time
 from datetime import datetime, timedelta
@@ -46,17 +47,13 @@ import yaml
 
 from shared.data_source import create_data_source
 from shared.contracts import normalize_ts_code
-
-# MarkItDown: 可选依赖，本地 PDF → 结构化 Markdown 转换
-try:
-    from markitdown import MarkItDown as _MarkItDown
-    _HAS_MARKITDOWN = True
-except ImportError:
-    _HAS_MARKITDOWN = False
-    _MarkItDown = None
+from shared.contracts import CONTRACT_VERSION
+from shared.project_config import configured_path
 
 CONFIG_PATH = SKILL_ROOT / "config.yaml"
-DB_PATH = SKILL_ROOT / "data" / "invest_skill.db"
+_db_override = os.environ.get("INVEST_DB_PATH")
+DB_PATH = (Path(_db_override).expanduser() if _db_override
+           else configured_path("db_file", "./data/invest_skill.db"))
 
 try:
     from dotenv import load_dotenv
@@ -76,6 +73,11 @@ CONFIG = load_config()
 # analysis_date 为可选的日期钉（历史回测用）；日常/cron 场景必须取系统当天，
 # 否则 sync 的数据截止日期会永远停留在配置里那一天（实测 DB 行情因此停滞在 07-20）
 _analysis_date = CONFIG["project"].get("analysis_date")
+_test_analysis_date = os.environ.get("INVEST_ANALYSIS_DATE")
+if _test_analysis_date and os.environ.get("INVEST_TEST_MODE") != "1":
+    raise RuntimeError("INVEST_ANALYSIS_DATE 仅允许在 INVEST_TEST_MODE=1 时使用")
+if _test_analysis_date:
+    _analysis_date = _test_analysis_date
 TODAY = datetime.strptime(_analysis_date, "%Y-%m-%d") if _analysis_date else datetime.now()
 
 
@@ -497,6 +499,7 @@ def cmd_annual(ts_code: str) -> dict:
         profit_points.append((int(yr), profit))
         years_data.append({
             "year": yr,
+            "revenue_yuan": rev, "net_profit_yuan": profit,
             "revenue_yi": _yi(rev), "net_profit_yi": _yi(profit),
             "net_margin_pct": _pct(profit, rev),
             "rd_expense_yi": _yi(row.get("rd_exp")),
@@ -965,8 +968,18 @@ def validate_snapshot(data: dict, reference_date: Optional[datetime] = None) -> 
         require(_f(latest_annual.get("net_profit_yi")) is not None,
                 "annual 最新年度净利润缺失")
     if len(annual_rows) >= 2 and all(year.isdigit() for year in annual_years):
-        for prefix, field in (("revenue", "revenue_yi"), ("profit", "net_profit_yi")):
-            points = [(int(item["year"]), item.get(field)) for item in annual_rows]
+        # CAGR 必须用原始元值重算：*_yi 是四舍五入到 0.01 亿的展示值，
+        # 小利润公司（亿元以下）重算误差可达 1pp，会误杀合法快照。
+        # 旧归档快照无 *_yuan 字段时回退 *_yi（口径与旧版本一致）。
+        for prefix, field, raw_field in (
+            ("revenue", "revenue_yi", "revenue_yuan"),
+            ("profit", "net_profit_yi", "net_profit_yuan"),
+        ):
+            points = []
+            for item in annual_rows:
+                raw = item.get(raw_field)
+                value = raw if raw is not None else item.get(field)
+                points.append((int(item["year"]), value))
             for output_field, horizon in (
                 (f"{prefix}_cagr_full_pct", None), (f"{prefix}_cagr_5y_pct", 5)
             ):
@@ -1129,7 +1142,7 @@ def validate_snapshot(data: dict, reference_date: Optional[datetime] = None) -> 
         "status": "FAIL" if errors else ("WARN" if warnings else "PASS"),
         "errors": errors,
         "warnings": warnings,
-        "contract_version": "0.5.1",
+        "contract_version": CONTRACT_VERSION,
     }
 
 
@@ -1148,209 +1161,6 @@ def cmd_all(ts_code: str) -> dict:
     }
     data["data_quality"] = validate_snapshot(data)
     return data
-
-
-def _find_local_annual_pdfs(ts_code: str, years: list[int]) -> dict[int, str]:
-    """在 ~/企业年报/{ts_code}/ 下查找匹配年份的 PDF 年报。"""
-    import os as _os
-    base = Path.home() / "企业年报" / ts_code
-    if not base.is_dir():
-        return {}
-    found = {}
-    for y in years:
-        for fname in _os.listdir(str(base)):
-            if fname.endswith(".pdf") and str(y) in fname and "年报" in fname:
-                found[y] = str(base / fname)
-                break
-    return found
-
-
-def _convert_pdf_with_markitdown(pdf_path: str) -> str:
-    """用 MarkItDown 将 PDF 转换为结构化 Markdown。"""
-    if not _HAS_MARKITDOWN:
-        raise RuntimeError("markitdown 未安装（pip install markitdown[all]）")
-    md = _MarkItDown()
-    result = md.convert(pdf_path)
-    return result.text_content
-
-
-def _split_markitdown_output(markdown_text: str, report_year: str) -> dict[str, dict[str, str]]:
-    """将 MarkItDown 输出的年报全文按章节拆分为 {report_type: {section_name: text}}。
-
-    MarkItDown 将 PDF 转为保留原始文本的 Markdown，但不会生成 # 标题层级。
-    年报的实际章节标记为「第X节 章节名」形式，因此按中文数字章节模式拆分。
-    """
-    import re as _re
-    text = markdown_text
-
-    # 识别年报类型
-    report_type = "annual"
-    if "半年报" in text[:2000] or "半年度报告" in text[:2000]:
-        report_type = "semi_annual"
-    elif "季报" in text[:2000] or "季度报告" in text[:2000]:
-        report_type = "quarterly"
-
-    # 按「第X节 章节名」拆分：以 \n第X节 为界切分
-    parts = _re.split(r'\n(?=第[一二三四五六七八九十百千]+[章节部]\s)', text)
-    sections = {}
-    if len(parts) >= 2:
-        if parts[0].strip():
-            sections["前言及目录"] = parts[0].strip()
-        for part in parts[1:]:
-            header_end = part.find("\n")
-            if header_end < 0:
-                header_end = len(part)
-            header = _re.sub(r'\s+', ' ', part[:header_end].strip())
-            body = part[header_end:].strip() if header_end < len(part) else ""
-            sections[header] = body
-    else:
-        # 无章节标记时，尝试按「目 录」分界：目录前为前言，目录后为正文
-        toc_idx = text.find("目 录") if "目 录" in text else text.find("目录")
-        if toc_idx > 0:
-            sections["重要提示及目录"] = text[:toc_idx].strip()
-            sections["正文"] = text[toc_idx:].strip()
-        else:
-            sections["全文"] = text.strip()
-
-    return {
-        report_type: {
-            "ann_date": "",
-            "title": f"{report_year}年{'年报' if report_type == 'annual' else '半年报' if report_type == 'semi_annual' else '季报'}（MarkItDown）",
-            "source_url": "",
-            "sections": sections,
-        }
-    }
-
-
-def cmd_annual_report(ts_code: str, years: int = 5, force: bool = False,
-                      use_markitdown: bool = True) -> dict:
-    """
-    抓取最近 N 年的年报/半年报/季报全文，解析后存入 annual_reports 表。
-
-    优先使用本地 PDF + MarkItDown 转换（结构化质量最高），
-    无本地 PDF 时回退到数据源的 text extraction。
-    返回结构化 dict，便于 LLM 消费。
-    """
-    ds = create_data_source(CONFIG)
-    # 年报对应已结束财政年度；1-4 月上一年度年报尚未到法定披露截止日。
-    end_year = TODAY.year - 1 if TODAY.month >= 5 else TODAY.year - 2
-    all_reports = {}
-    stored_sections = 0
-    conn = get_db()
-    now = TODAY.strftime("%Y-%m-%d")
-    target_years = list(range(end_year - years + 1, end_year + 1))
-
-    if not force:
-        # 先一次性装载全部可用数据库正文，避免按升序遇到最老缺口就触发慢速联网。
-        for y in target_years:
-            cached_rows = conn.execute(
-                """SELECT report_type, ann_date, title, section_name, section_text, source_url
-                   FROM annual_reports
-                   WHERE ts_code=? AND report_year=?
-                     AND LENGTH(TRIM(COALESCE(section_text, ''))) >= 200
-                   ORDER BY report_type, section_name""",
-                (ts_code, str(y)),
-            ).fetchall()
-            if not cached_rows or sum(len(row[4] or "") for row in cached_rows) < 1000:
-                continue
-            reports = {}
-            for report_type, ann_date, title, section_name, section_text, source_url in cached_rows:
-                report = reports.setdefault(report_type, {
-                    "ann_date": ann_date or "", "title": title or "",
-                    "source_url": source_url or "", "sections": {},
-                })
-                report["sections"][section_name] = section_text
-            all_reports[str(y)] = reports
-            stored_sections += len(cached_rows)
-
-    for y in reversed(target_years):
-        if str(y) in all_reports:
-            continue
-        # 最新应有年度必须先尝试补齐；3 年窗口只能跳过更早缺口。
-        if not force and len(all_reports) >= 3 and y != end_year:
-            break
-        try:
-            data = None
-            # MarkItDown 优先级最高：本地 PDF → 结构化 Markdown
-            if use_markitdown and _HAS_MARKITDOWN:
-                local_pdfs = _find_local_annual_pdfs(ts_code, [y])
-                if y in local_pdfs:
-                    try:
-                        logger.info(f"MarkItDown 转换本地 PDF: {local_pdfs[y]}")
-                        md_text = _convert_pdf_with_markitdown(local_pdfs[y])
-                        data = _split_markitdown_output(md_text, str(y))
-                        data["_source"] = "markitdown"
-                    except Exception as exc:
-                        logger.warning(f"MarkItDown 转换失败 {ts_code} {y}: {exc}，回退数据源")
-            # 回退：数据源 text extraction
-            if data is None:
-                cache_source = getattr(ds, "cache", None)
-                if cache_source is not None:
-                    try:
-                        data = cache_source.get_annual_report_text(ts_code, str(y))
-                    except Exception:
-                        data = ds.get_annual_report_text(ts_code, str(y))
-                else:
-                    data = ds.get_annual_report_text(ts_code, str(y))
-            if not data or not data.get("reports"):
-                continue
-            all_reports[str(y)] = data["reports"]
-            # 写入数据库：按年份包裹事务，单年失败不影响其他年份
-            conn.execute("BEGIN")
-            try:
-                for report_type, report_data in data["reports"].items():
-                    # 删除旧数据
-                    conn.execute(
-                        "DELETE FROM annual_reports WHERE ts_code=? AND report_year=? AND report_type=?",
-                        (ts_code, str(y), report_type)
-                    )
-                    # 写入各章节
-                    for section_name, section_text in report_data.get("sections", {}).items():
-                        conn.execute(
-                            """INSERT INTO annual_reports
-                               (ts_code, report_year, report_type, ann_date, title, section_name, section_text, source_url, updated_at)
-                               VALUES (?,?,?,?,?,?,?,?,?)""",
-                            (ts_code, str(y), report_type,
-                             report_data.get("ann_date", ""),
-                             report_data.get("title", ""),
-                             section_name,
-                             section_text,
-                             report_data.get("source_url", ""),
-                             now)
-                        )
-                        stored_sections += 1
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
-        except Exception as e:
-            logger.warning(f"年报抓取失败 {ts_code} {y}: {e}")
-
-    conn.close()
-
-    # 返回摘要，避免全文过大
-    summary = {}
-    for year, reports in all_reports.items():
-        summary[year] = {
-            "report_types": list(reports.keys()),
-            "section_names": {},
-            "char_counts": {},
-        }
-        for rt, rd in reports.items():
-            secs = list(rd.get("sections", {}).keys())
-            summary[year]["section_names"][rt] = secs
-            summary[year]["char_counts"][rt] = sum(len(v) for v in rd.get("sections", {}).values())
-
-    output = {
-        "ts_code": ts_code,
-        "years_requested": years,
-        "years_fetched": list(all_reports.keys()),
-        "stored_sections": stored_sections,
-        "summary": summary,
-    }
-    if stored_sections == 0:
-        raise RuntimeError(f"年报正文不可得或解析后无有效章节: {ts_code}")
-    return output
 
 
 # ── 输出 ──
@@ -1402,9 +1212,6 @@ def main() -> int:
     for cmd in ["stock-info", "market", "annual", "quarterly", "balance", "indicators", "industry", "forecast", "all"]:
         p = sub.add_parser(cmd)
         p.add_argument("ts_code", help="如 300408.SZ 或 603605.SH")
-    p_annual_report = sub.add_parser("annual-report")
-    p_annual_report.add_argument("ts_code", help="如 300408.SZ 或 603605.SH")
-    p_annual_report.add_argument("--force", action="store_true", help="忽略数据库正文缓存并重新抓取")
     # 不需要 ts_code 的子命令
     sub.add_parser("macro", help="获取当前宏观关键指标（GDP/PMI/CPI/PPI/M1-M2/利率）")
     sub.add_parser("sync-all-stocks", help="同步全部 A 股基础信息到 stocks 表")
@@ -1443,7 +1250,6 @@ def main() -> int:
         "quarterly": lambda: cmd_quarterly(ts_code), "balance": lambda: cmd_balance(ts_code),
         "indicators": lambda: cmd_indicators(ts_code), "industry": lambda: cmd_industry(ts_code),
         "forecast": lambda: cmd_forecast(ts_code), "all": lambda: cmd_all(ts_code),
-        "annual-report": lambda: cmd_annual_report(ts_code, years=5, force=force_sync),
     }
     try:
         result = CMDS[args.command]()

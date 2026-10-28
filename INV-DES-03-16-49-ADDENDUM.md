@@ -1,0 +1,10 @@
+# INV-DES-03 — 2026-10-18 16:49 巡检补充
+
+本补充记录提醒巡检及 `run_challenges.sh` 兼容入口的一项静态分析；不构成全量矩阵或动态验证。
+
+- **巡检：**系统采样`2026-10-18T16:49:29+08:00`；本次schedule occurrence `2026-10-18T08:49:29.700Z`换算为`16:49:29.700+08:00`，识别本轮提醒，不解决C145–C154历史映射。排程每1800秒；task board为空、roster仅lead运行；无其他主矩阵ACK/交付，实际owner仍investPM。主任务仍`IN_PROGRESS/BLOCKED`、非`READY_FOR_CODE`；AC2/3/4/6/9未闭、候选SHA未冻结、无同SHA QA、全量ETA未知。
+- **兼容shell的root时序：**`scripts/run_challenges.sh:9-11`先令`TMP_DIR=${INVEST_RUNTIME_DIR:-${INVEST_SKILL_HOME:-/tmp}}`并导出`INVEST_RUNTIME_DIR`，然后在`:49-54`调用 `runtime_guard.py claim-run`。fresh分支在`:71-76`按早期TMP_DIR查旧结果并运行`prepare_challenges.py`；到`:81-93`才从`INVEST_SKILL_HOME`/`project_config.runtime_root()`确定RUNTIME_ROOT，再覆写`INVEST_SKILL_HOME/INVEST_RUNTIME_DIR`、TMP_DIR及LOG_DIR。因此源码确实显示初始检查/guard/prepare与后续 worker写入存在不同解析阶段；实际是否分叉取决于输入env/config，不由静态顺序单独证明。`runtime_guard.py`和`prepare_challenges.py`自身导入`shared.runtime`并捕获其import-time resolver snapshot；prepare的`wiki_expert_root()`另走project config。这是multi-resolver操作边界，不推定已发生错根。
+- **写/删阶段：**`:93-96`创建独立LOG_DIR并记运行元数据；`:100-120`worker使用当前TMP_DIR读prompt、写staged/normalized/result、把日志追加到LOG_DIR，归一成功后`mv -f`覆盖result，随后rm staging；结束时`:137-145`运行validator/失败证据helper。入口无单一operation root对象贯穿整个流程；shell路径检查主要是`RUNTIME_ROOT == SKILL_ROOT`字符串比较（`:84-88`），本轮未发现shell入口对所有上述目标作统一realpath/purpose allowlist check。命令API行为、目标可写范围及mode/owner均未动态验证，不据此断言已经能越界。
+- **与native路径区分：**native callers另有job构造、staged realpath containment，不能拿来覆盖此compat shell链。`run_challenges.sh`自身无该native commit的staged containment gate，是单独待核入口；运行只限用户显式opt-in兼容流程的文档边界，不能据静态审查授权启动。
+- **AC关联/待核：**AC2（调用者/读写删除与root矩阵）、AC3（早期TMP_DIR vs后续configured root、helper import snapshot）、AC4（shell umask 077下新建对象推断与既有目标权限策略）、AC6/9（每一写删目标用途allowlist、坏根/symlink/TOCTOU/首次副作用前拒绝）。未核：各变量配置组合的逐步有效root、legacy script是否可达生产入口、目标mode/owner、错误组合零写入、失败中断/并发及恢复。未运行shell、subprocess、CLI、SQLite、Provider或测试，未触碰runtime/真实数据/外部路径。
+- **下一责任人/动作：**@investPM（本人owner）继续只读核legacy shell root时序对照表和剩余writer，列明已核/未核矩阵及下一依赖；全量ETA未知。动态隔离验证需授权与独立QA。

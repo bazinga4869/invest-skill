@@ -11,16 +11,20 @@ import sys
 from pathlib import Path
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
-WIKI_ROOT = SKILL_ROOT.parent / "invest-wiki" / "04_stock-analysis-expert"
 sys.path.insert(0, str(SKILL_ROOT))
 
 from scripts.collect_results import (
-    expected_batch_id, expected_data_date, parse_frontmatter, validate_expert,
+    expected_batch_id, expected_data_date, validate_expert,
 )
 from shared.review_contracts import challenge_prompt_hash
 from scripts.verify_report import extract_numbers
 from shared.checklist_verify import check_expert_coverage, load_checklist
 from shared.contracts import normalize_ts_code
+from shared.project_config import wiki_expert_root
+from shared.runtime import RUNTIME_ROOT
+
+WIKI_ROOT = wiki_expert_root()
+VALID_CHALLENGE_VERDICTS = ("UNCHANGED", "DOWNGRADED", "UPGRADED")
 
 
 def experts() -> list[dict]:
@@ -53,7 +57,7 @@ def select_fact(result_text: str) -> tuple[str, str]:
 
 
 def expected_challenge_prompt(code: str, expert_id: str,
-                              base_dir: Path = Path("/tmp")) -> str:
+                              base_dir: Path = RUNTIME_ROOT) -> str:
     """从受批次约束的输入确定性重建单份二级质询 prompt。"""
     entry = {item["id"]: item for item in experts()}[expert_id]
     data = json.loads((base_dir / f"invest_data_{code}.json").read_text(encoding="utf-8"))
@@ -61,7 +65,6 @@ def expected_challenge_prompt(code: str, expert_id: str,
         encoding="utf-8"
     )
     batch_id = str(data.get("meta", {}).get("batch_id") or "")
-    data_date = str(data.get("market", {}).get("trade_date") or "")
     method_path = WIKI_ROOT / "experts" / f"{entry['file']}.md"
     bank = question_bank(method_path.read_text(encoding="utf-8"))
     if len(bank) < 4:
@@ -82,10 +85,29 @@ def expected_challenge_prompt(code: str, expert_id: str,
         if missing_items else "请指出原报告中最薄弱的一项假设，并给出可证伪它的下一个数据点。"
     )
     result_hash = hashlib.sha256(result_text.encode("utf-8")).hexdigest()
-    fm = parse_frontmatter(result_text)
+    sidecar_path = base_dir / f"invest_result_{code}_{expert_id}.v3.json"
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    argument_bundle = {
+        "analysis": sidecar.get("analysis") or [],
+        "checklist": sidecar.get("checklist") or [],
+        "risks": sidecar.get("risks") or [],
+        "decision": sidecar.get("decision") or {},
+    }
+    argument_text = json.dumps(
+        argument_bundle, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+    argument_hash = hashlib.sha256(argument_text.encode("utf-8")).hexdigest()
     prompt = f"""你正在接受 invest-skill 第二级魔鬼代言人质询。只回答质询，不要重写原报告。
 
 标的：{code}；专家：{expert_id}；批次：{batch_id}。
+原专家报告哈希：{result_hash}
+原论证输入束哈希：{argument_hash}
+challenge_prompt_hash: "__PROMPT_HASH__"
+
+以下是原报告的结构化 claim/evidence/assumption/risk/checklist/decision 输入束；必须基于它质询，不得只围绕单个数字：
+```json
+{argument_text}
+```
 
 题库问题：{bank_question}
 
@@ -93,31 +115,13 @@ def expected_challenge_prompt(code: str, expert_id: str,
 
 缺失项/薄弱假设追问：{missing_question}
 
-请用 150-300 个中文字符合并回应三个问题，必须正面说明不利情景、结论是否改变、以及下一个可证伪数据；不得新增无来源数字。
+请用一百八十至三百六十个中文字符合并回应三个问题，必须正面说明不利情景、结论是否改变、以及下一个可证伪数据。response 中禁止出现任何阿拉伯数字、百分号、JSON 路径、分数或阈值；用“题设压力”“原阈值”“原评分”等定性措辞回指，不得复制问题中的数字，也不得新增数字。问题原文、批次和哈希由受信任包装器写入最终结果，你不要复制它们，也不要输出 Markdown 标题或 front matter。
 
-输出必须严格使用：
----
-expert_id: "{expert_id}"
-ts_code: "{code}"
-data_date: "{data_date}"
-analysis_date: "{fm.get('analysis_date')}"
-batch_id: "{batch_id}"
-expert_result_hash: "{result_hash}"
-challenge_prompt_hash: "__PROMPT_HASH__"
-challenge_verdict: UNCHANGED | DOWNGRADED | UPGRADED
----
+只输出下面两个 YAML 字段。challenge_verdict 合法枚举严格为 UNCHANGED、DOWNGRADED、UPGRADED 三者之一；response 必须是一段完整中文回应：
 
-# {expert_id} 魔鬼代言人回应
-
-## 质询问题
-
-1. {bank_question}
-2. {dynamic_question}
-3. {missing_question}
-
-## 合并回应（150-300 个中文字符）
-
-一段连续回应。
+challenge_verdict: {" | ".join(VALID_CHALLENGE_VERDICTS)}
+response: |
+  在这里给出一百八十至三百六十个中文字符且不含阿拉伯数字的连续回应。
 """.lstrip()
     prompt_hash = challenge_prompt_hash(prompt.encode("utf-8"))
     if not prompt_hash:
@@ -146,7 +150,7 @@ def main() -> int:
     outputs = {}
     for entry in experts():
         expert_id = entry["id"]
-        result_path = Path(f"/tmp/invest_result_{code}_{expert_id}.md")
+        result_path = RUNTIME_ROOT / f"invest_result_{code}_{expert_id}.md"
         problems = validate_expert(code, expert_id, data_date, batch_id)
         if problems:
             print(f"✗ {expert_id} 原报告未通过门禁: {problems[:3]}", file=sys.stderr)
@@ -156,7 +160,7 @@ def main() -> int:
         except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
             print(f"✗ {expert_id} 质询 prompt 生成失败: {exc}", file=sys.stderr)
             return 2
-        outputs[Path(f"/tmp/invest_challenge_prompt_{code}_{expert_id}.txt")] = prompt
+        outputs[RUNTIME_ROOT / f"invest_challenge_prompt_{code}_{expert_id}.txt"] = prompt
 
     staged = {}
     try:

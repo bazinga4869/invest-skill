@@ -1,0 +1,25 @@
+# INV-DES-03 — 2026-10-19 00:19 巡检 / stale lease 与恢复方案边界
+
+本轮只读巡检正式合同、群回报、任务板与源码；未运行脚本、测试、cleanup、CLI、SQLite、Provider或批次，未触碰runtime、真实数据、凭证、知识库或工作区外路径。
+
+- **巡检基线：**系统采样 `2026-10-19T00:19:29+08:00`；schedule occurrence `2026-10-18T16:19:29.700Z`换算为`2026-10-19T00:19:29.700+08`，与采样吻合。`team_task_list`为空，`list_agents`仅lead运行；本轮群内投研流程和投研复核提交了只读复核，无新矩阵交付。合同v4.28，`IN_PROGRESS/BLOCKED`、非`READY_FOR_CODE`；AC2/3/4/6/9未闭，候选SHA未冻结、无同SHA QA、全量ETA未知。当前提醒吻合不解决历史C168及更早提醒ID映射。
+
+- **悬空引用处置复核：**本目录现有23:19、23:47、23:49附录；`INV-DES-03-23-45-ADDENDUM.md`不存在。本轮之前合同索引仍含“悬空23:45已移除”的状态说明而不含失效路径；本轮重新阅读确认不存在错误文件链接。群内wiki_manager提出23:45内容不应作证，本轮不恢复/猜造其内容，仅将已核实文件列作证据。
+
+- **lease恢复调用者边界：**`runtime_guard.claim_run()`对任何现存state拒绝，未用`created_at`/`pid`作stale判断（`runtime_guard.py:109-128`）；显式`release-run`校验owner/token（`:131-142`），`recover-retry`仅重试标记（`:244-269`）。native正常和部分异常路径会release；强制终止不保证走完。群内结论“cleanup不是唯一正常恢复路径”成立；但不存在代码自动stale恢复，且不能因此把cleanup删除活动lease作为恢复机制。强杀后state持续存在时claim会持续拒绝，除非调用显式release/外部运维；这是条件性静态行为，不证明当前有stale state或生产阻塞。
+
+- **chief关于自动回收的限制已采纳：**boot-id不一致只有在可靠绑定同一宿主身份、同一boot标识来源、持久化lease确实由该宿主唯一持有且无共享目录多主机并发时，才可能是候选证据；不能无条件等同writer已停止。心跳过期同理不证明writer终止；纯TTL会误杀长运行。`getppid()`及替换为`getpid()`都不足以证明lease真正writer的存活状态。boot-id、heartbeat、force-release均只为待设计选项，未验证、未获授权；这些假设与失效判据尚未在代码或部署边界核验。**PM设计决策（本合同采纳；尚未实现/复核）：**采用“不自动回收”的保守语义：任意run-state存在继续拒绝claim；cleanup不得删除自持、活动或未证明失效的lease。恢复只走显式人工`release-run`：操作人仅限用户既有授权下的工作区项目维护owner（本项目当前owner为investPM，不扩大至工作区外操作）；释放前须核对run identity和原claim token，并在受保护append-only审计中记录ts_code、owner/token匹配结果、操作者、reason、时间、state快照/hash、旧writer停止证据或明确风险签核。**由于现有审计落点/权限/CLI执行顺序尚未核实，在可验证“先审计成功、后释放”流程设计并通过独立复核前，人工release流程保持禁用/阻塞；唯一允许动作是保留state并升级给investPM，在工作区设计记录留痕，不先删除lease。**owner/token不匹配、writer仍活跃/证据不足且无风险签核、审计不可写或审计失败时必须拒绝release并保留lease。任何强制绕过owner/token、自动boot-id/heartbeat回收、cleanup代释放均不允许。现有接口能力已静态核实：`runtime_guard.release_run()`（`:131-142`）只读取state、核owner及可选token后直接unlink；CLI `release-run`（`:236-258`）直接调用，不含reason、先行审计或操作者授权步骤。因此现实现不符合上述SOP，不能启用人工释放流程，需先设计并实现受控API/流程，再独立复核。自动stale回收仅作为后续可选设计：先明确lease owner模型及单宿主/共享存储假设，再对boot-id/heartbeat证据、原子转移、审计与旧writer隔离提出可证伪AC，经独立设计复核后再考虑；若不能证明旧writer已失权，禁止回收。
+
+- **AC9已收敛设计要求（待独立复核/未实现）：**不自动回收；现存state一律继续阻止claim；cleanup不可删除自持、活动或未证明失效的lease。唯一设计内恢复路径为经授权维护角色显式`release-run`，须先核对owner/token，记录操作者、reason、run-state快照/hash、writer停止证据或风险签核及时间至不可变审计；token不匹配、审计不可用、writer停止证据不足且无风险签核时拒绝并保留lease。无force绕过、无自动boot-id/heartbeat回收、无cleanup代释放。现有接口不具备已证明的reason/授权/审计先行机制：`release_run()`校验owner/可选token后立即unlink（`runtime_guard.py:131-142`），CLI直接调用（`:236-258`）；因此人工release现阶段禁止/阻塞，须先实现受控流程并独立复核。另覆盖旧writer活跃、进程强杀、宿主重启、PID复用/namespace、共享根跨宿主等正负边界；assemble非-defer不得清除自持lease。
+
+- **剩余矩阵清单/检查点：**以`INV-DES-03-MATRIX-REMAINING.md`为集中去重分组索引（REM-01…REM-09），补全生产Python读者/写者/删除者、shell/cron/环境传递、SQLite/sidecar、外部root边界、Resolver/root/mode/allowlist及测试隔离/候选QA；每个叶条目需标caller、文件/行号、实际参数、操作类别、根解析时点、mode/owner来源、异常/部分提交及证据状态。当前仅分组计划，不是已完成行级分母，完整分母和ETA仍未知。检查点：P0 AC9人工恢复流程在工作区内写成唯一保守标准并独立复核；P1按REM-01..06每轮交一组新行号级核验且标记生产/测试；P2同步将root/allowlist/零副作用负例归入相同条目；P3只形成获批前验证方案，不运行动态测试。已核cleanup局部调用和lease时序不能替代矩阵。
+
+- **剩余项优先级/具体检查点（PM设计计划，非完成宣称）：**P0—AC9：先修正assemble non-defer路径自删finalize lease的设计要求，并由投研复核审查；设计中明确保守无自动回收、显式恢复授权与留痕的条件。P1—AC2/AC4：完成production reader/writer/deleter唯一分母和逐写点root/mode/owner表，按已识别未分类的`shared/*`、`scripts/*`与入口继续切片，逐项记录已核/未核。P2—AC3/AC6：对每类入口梳理persistent/operation root选择、用途allowlist及坏根/symlink拒绝前零副作用条件。P3—AC5/7/8/10：冻结后续授权隔离验证计划、候选SHA与独立QA证据要求；当前不执行。每次PM更新以一组准确行号、caller/实参、分类与反例要求为检查点；只有清单去重完成后才估总体ETA。
+
+- **责任与状态：**主矩阵设计owner为@investPM；本轮安排@投研复核做设计独立审查，收到ACK前为WAIT_ACK，范围仅审阅下面的lease恢复设计提案及AC遗漏，不做代码/运行时/QA。开发者和独立工程QA尚未获用户明确同意指定/新建，不派实现。动态恢复/故障验证、真实数据/Provider/凭证、知识库/面板/外部服务/发布均不在本轮授权内。主任务继续`IN_PROGRESS/BLOCKED`、非`READY_FOR_CODE`，候选SHA未冻结、无同SHA QA。
+
+- **结论/下一步：**此前投研复核对v4.28作合同静态PASS，仅确认边界表述，不表示恢复机制设计/实现完成或动态QA通过。no-auto-reclaim与显式release安全前提已由PM写为当前设计决策，待投研复核；任何动态故障验证另行授权，并在冻结候选SHA上由独立QA执行。
+
+- **00:45补充：calibrate reader的“新覆盖”与旧切片区分。**双reader同次main调用及potential split-root早在合同前序10:49状态已登记；00:19投研流程/投研复核对此复述属于重复核验，不计新增覆盖。本次wiki_manager补充的独立静态观察为：`calibrate_scores.py:95-97`在同一main先后执行两个reader；当前scores从import-time `RUNTIME_ROOT`读取（`:39-50`），history reader调用时用`project_config.runtime_root()`（`:53-62`）。另外`activity_log.sh:15-23,56-59`按`INVEST_LOG_DIR > INVEST_SKILL_HOME > $HOME/invest-skill`选写入路径，而calibrate源码不引用`INVEST_LOG_DIR`；因此当日志writer被显式覆盖到该变量而calibrate解析到另一处时，历史数据可能缺失，代码将返回`n=0`/“样本不足”而非报路径错。`tests/integration_test.sh`中出现该变量只证明测试源码存在覆盖用法，不证明生产实际设置/发生静默失配。文档`:8,40`还将`logs/activity.jsonl`及`/tmp/invest_result_*`写成固定用法，可能与路径契约不一致。均为静态缺陷候选，未运行、未读取日志、未证明实际影响；是否修复需结合完整调用者矩阵设计，不在此处改代码。矩阵口径按Chief意见限定：覆盖路径与reader路径不同且历史仅存在于覆盖路径时才会静默漏读；双reader同次调用是旧切片补证，`INVEST_LOG_DIR`不一致才计独立新负例。
+
+- **00:45巡检/新切片：**schedule occurrence `2026-10-18T16:45:51.179Z`换算与采样`2026-10-19T00:45:51+08`吻合，提醒仍1800秒；task board为空，roster仅lead运行。另只读核`scripts/checklist_audit.py:16-29,62-80`：提供`report_path`时直接`Path(report_path).read_text`，未见本文件自身root allowlist；使用`--code`则glob/读import-time `RUNTIME_ROOT`。输出仅stdout，无本文件内writer；仓内Python搜索未发现直接调用命中，不排除仓外人工/宿主入口。该项为path-input reader边界补充，未执行/读取runtime。合同仍BLOCKED；全量矩阵、模式/根/allowlist/拒绝与故障恢复及同SHA QA未闭，ETA未知。下一责任人为@investPM继续矩阵；不重复计calibrate旧reader切片。

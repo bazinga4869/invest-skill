@@ -9,10 +9,18 @@
 #   log_activity "report" "600298.SH" "安琪酵母" "success" "HOLD 54分"
 #   log_activity "error" "600298.SH" "安琪酵母" "failure" "prompt生成失败: exit=1"
 #
-# 输出文件：$SKILL_ROOT/logs/activity.jsonl
+# 输出文件：运行时根 logs/activity.jsonl（INVEST_SKILL_HOME / INVEST_LOG_DIR 优先）
 # ============================================================
 
-ACTIVITY_LOG="${ACTIVITY_LOG:-$HOME/invest-skill/logs/activity.jsonl}"
+if [[ -z "${ACTIVITY_LOG:-}" ]]; then
+    if [[ -n "${INVEST_LOG_DIR:-}" ]]; then
+        ACTIVITY_LOG="$INVEST_LOG_DIR/activity.jsonl"
+    elif [[ -n "${INVEST_SKILL_HOME:-}" ]]; then
+        ACTIVITY_LOG="$INVEST_SKILL_HOME/logs/activity.jsonl"
+    else
+        ACTIVITY_LOG="$HOME/invest-skill/logs/activity.jsonl"  # 向后兼容
+    fi
+fi
 
 # 自动检测调用方 agent
 detect_caller() {

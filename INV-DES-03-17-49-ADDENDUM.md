@@ -1,0 +1,11 @@
+# INV-DES-03 — 2026-10-18 17:49 巡检与 legacy expert runner 核验
+
+本补充只记录提醒巡检和 `run_experts.sh` 的静态逐点观察，不构成全量矩阵/动态验证/工程QA。
+
+- **巡检：**系统采样`2026-10-18T17:49:29+08:00`，本次schedule occurrence `2026-10-18T09:49:29.700Z`换算`17:49:29.700+08:00`，相差约0.7秒，仅识别本轮提醒，不解C145–C155历史映射。排程仍每1800秒；`team_task_list`为空、`list_agents`仅lead运行，无其他主矩阵ACK/交付，实际owner仍investPM。主任务IN_PROGRESS/BLOCKED、非READY_FOR_CODE；AC2/3/4/6/9未闭，candidate SHA未冻结、无同SHA QA，全量ETA未知。
+- **入口root与调用顺序（按后续复核更正）：**`run_experts.sh:34-42`先设`umask 077`并捕获早期 `TMP_DIR=${INVEST_RUNTIME_DIR:-${INVEST_SKILL_HOME:-/tmp}}`，export `INVEST_RUNTIME_DIR`。随后脚本顶层在`:101-115`解析persistent `RUNTIME_ROOT`、执行 `RUNTIME_ROOT == SKILL_ROOT` 字符串守卫，并将`TMP_DIR`/`INVEST_RUNTIME_DIR` canonicalize为`RUNTIME_ROOT`、设置`LOG_DIR`。**只有这些操作之后**，`main()`在`:425-429`才选择运行`prepare_prompts.py`或require-prompts/bundle verifier；`runtime_guard claim-run`在`:432-440`更晚。故前版“prepare/require早于persistent-root guard”的描述撤销：准确为“初始 override 在prepare/require前已被覆盖；prepare/require晚于persistent-root guard但早于claim”。这保住该runner prepare输入实际使用RUNTIME_ROOT的路径事实，但不代表早期初始变量本身被验证，亦不覆盖其他入口。
+- **prompt/result/log/repair写点：**主prompt由`prepare_prompts.py`写；runner以重设后的`TMP_DIR`读prompt/写结果与staging (`:141-144,175-184`)，修复阶段在`TMP_DIR`用shell重定向写errors JSON和fix prompt (`:183-184,195-206,221-251`)，`mv -f`发布staged结果并`rm -f`清理stage/fix artifacts (`:262-270,334-340`)；日志使用独立`LOG_DIR` append。fresh及retry门禁在claim之后，repair只在单专家校验失败时继续。shell guard只检查persistent `RUNTIME_ROOT` 与 `SKILL_ROOT`，不验证初始override的真实性/用途allowlist；其条件性缺口已由resolver guard补充记录，实际env与目标行为仍未知。
+- **输出权限边界：**shell设`umask 077`，故POSIX新建log/redirect目标预计owner-only；这是静态推断，未stat。覆盖既有更宽权限的重定向或mv替换行为不自动证明fail-closed。脚本曾对RUNTIME_ROOT做字符串相等guard，但尚未见此处对TMP_DIR、LOG_DIR及每一目标统一realpath/purpose allowlist检查。`prompt_file/result_file/staged_result_file`通过`TMP_DIR`生成，fix errors/fix prompt同样如此；调用者未逐项施加目标约束。未推断实际越界写。
+- **已核/未核：**已核初始root捕获、top-level persistent guard/override canonicalize、main中prepare/require与claim顺序、TMP_DIR与LOG_DIR分离、repair redirection/mv/rm写删类别。未核生产调用者和env矩阵、实际root/目录mode/owner、既有宽权限目标拒绝、路径/symlink race、guard失败首副作用前零写入、agent CLI timeout孤儿进程及部分写恢复、全仓写点完整分母。
+- **范围限制：**`run_experts.sh`标注为显式外部CLI兼容层，正常流程走native；本轮未执行该脚本、prepare、模型/外部CLI、测试、SQLite、Provider或批次，未读runtime/真实数据/工作区外。
+- **下一责任人/动作：**@investPM（本人owner）继续只读核剩余legacy shell roots/写点并补AC2/3/4/6/9 evidence；全量ETA未知。动态隔离验证需单独授权、独立QA。

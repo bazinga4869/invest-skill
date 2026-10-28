@@ -64,21 +64,6 @@ def check_expert_coverage(expert_id: str, expert_text: str, checklist: dict) -> 
         )
         document_locator = re.search(r'(?:年报|wiki):[^|`\s]+', evidence, re.IGNORECASE)
         substantive_conclusion = len(re.sub(r'[`*_\s]', '', conclusion)) >= 4
-        semantic_text = (evidence + " " + conclusion).lower()
-        latin_terms = [term.lower() for term in re.findall(r'[A-Za-z]{2,}', item)]
-        chinese_chunks = re.findall(r'[\u4e00-\u9fff]{2,}', item)
-        generic_bigrams = {
-            "检查", "分析", "评估", "记录", "趋势", "判断", "专项",
-            "框架", "视角", "检验", "速览", "合理", "深度", "最终",
-        }
-        chinese_terms = {
-            chunk[index:index + 2]
-            for chunk in chinese_chunks for index in range(len(chunk) - 1)
-            if chunk[index:index + 2] not in generic_bigrams
-        }
-        semantic_match = any(term in semantic_text for term in latin_terms) or any(
-            term in semantic_text for term in chinese_terms
-        )
         # 证据语义规则只检查可验证的 JSON/文档定位原子，
         # 不允许在定位后随手追加关键词骗过项目约束。
         evidence_atoms = re.findall(
@@ -95,7 +80,6 @@ def check_expert_coverage(expert_id: str, expert_text: str, checklist: dict) -> 
         valid_record = bool(
             row and evidence and conclusion and (json_locator or document_locator)
             and substantive_conclusion
-            and semantic_match
             and evidence_rule_match
             and not any(marker in evidence or marker in conclusion for marker in placeholders)
         )

@@ -1,10 +1,8 @@
 import math
 import json
 import sqlite3
-import tempfile
 import unittest
 from datetime import datetime
-from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
@@ -20,7 +18,6 @@ from shared.data_tools import (
     _sum_nullable,
     _ttm,
     _yi,
-    cmd_annual_report,
     cmd_market,
     validate_snapshot,
 )
@@ -177,7 +174,7 @@ class DataContractTests(unittest.TestCase):
             "industry": {"ts_code": "000001.SZ"},
             "forecast": {"ts_code": "000001.SZ"}, "macro": {},
         }
-        quality = validate_snapshot(data)
+        quality = validate_snapshot(data, reference_date=datetime(2026, 7, 30))
         self.assertEqual(quality["status"], "WARN")
         self.assertTrue(any("goodwill" in message for message in quality["warnings"]))
         self.assertTrue(any("资本开支" in message for message in quality["warnings"]))
@@ -203,47 +200,6 @@ class DataContractTests(unittest.TestCase):
             result = cmd_market("000001.SZ")
         self.assertEqual(result["trade_date"], "20200102")
         self.assertEqual(result["close"], 10)
-
-    def test_annual_cache_never_skips_latest_expected_year(self):
-        with tempfile.TemporaryDirectory() as temp:
-            db_path = Path(temp) / "annual.db"
-            conn = sqlite3.connect(db_path)
-            conn.execute(
-                "CREATE TABLE annual_reports (ts_code TEXT, report_year TEXT, "
-                "report_type TEXT, ann_date TEXT, title TEXT, section_name TEXT, "
-                "section_text TEXT, source_url TEXT, updated_at TEXT)"
-            )
-            for year in (2022, 2023, 2024):
-                conn.execute(
-                    "INSERT INTO annual_reports VALUES (?,?,?,?,?,?,?,?,?)",
-                    ("000001.SZ", str(year), "annual", f"{year + 1}0430", "年报",
-                     "经营情况讨论与分析", "正文" * 600, "u", "now"),
-                )
-            conn.commit()
-            conn.close()
-
-            calls = []
-
-            class FakeSource:
-                cache = None
-
-                def get_annual_report_text(self, ts_code, year):
-                    calls.append(year)
-                    return {"reports": {"annual": {
-                        "ann_date": "20260430", "title": "2025年报", "source_url": "u",
-                        "sections": {"经营情况讨论与分析": "最新正文" * 300},
-                    }}} if year == "2025" else {"reports": {}}
-
-            def fresh_conn():
-                return sqlite3.connect(db_path)
-
-            with patch("shared.data_tools.get_db", side_effect=fresh_conn), patch(
-                "shared.data_tools.create_data_source", return_value=FakeSource()
-            ), patch("shared.data_tools.TODAY", datetime(2026, 7, 31)):
-                result = cmd_annual_report("000001.SZ", years=5, force=False)
-            self.assertIn("2025", calls)
-            self.assertIn("2025", result["years_fetched"])
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -15,7 +15,10 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
-TRACE_DIR = SKILL_ROOT / "logs" / "trace"
+sys.path.insert(0, str(SKILL_ROOT))
+from shared.project_config import runtime_root
+
+TRACE_DIR = runtime_root() / "logs" / "trace"
 
 
 def load_traces(days: int = None, code: str = None):

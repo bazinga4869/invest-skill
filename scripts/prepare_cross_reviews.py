@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -17,14 +18,35 @@ from scripts.collect_cross_reviews import (
 from scripts.collect_results import expected_batch_id, expected_data_date, validate_expert
 from shared.contracts import normalize_ts_code
 from shared.review_contracts import cross_prompt_hash
+from shared.runtime import RUNTIME_ROOT
 
 EXPERTS = [item["id"] for item in json.loads(
     (SKILL_ROOT / "data" / "experts.json").read_text(encoding="utf-8")
 )["experts"]]
+REVIEW_LENSES = {
+    "blind-reviewer-a": "证据完整性、来源边界与反证强度",
+    "blind-reviewer-b": "估值假设、情景压力与资本损失风险",
+    "blind-reviewer-c": "治理行为、认知偏差与跨框架矛盾",
+}
+
+
+def _blind_text(text: str) -> str:
+    """Redact author identity and prior score/verdict from level-three input."""
+    if text.startswith("---\n"):
+        parts = text.split("\n---\n", 1)
+        text = parts[1] if len(parts) == 2 else text
+    kept = []
+    for line in text.splitlines():
+        if re.search(r"(?i)(^|\b)(score|verdict|rating)(\b|:)|评分|评级|结论方向", line):
+            continue
+        for expert_id in EXPERTS:
+            line = line.replace(expert_id, "anonymous-domain")
+        kept.append(line)
+    return "\n".join(kept).strip()
 
 
 def expected_cross_prompt(code: str, reviewer: str,
-                          base_dir: Path = Path("/tmp")) -> str:
+                          base_dir: Path = RUNTIME_ROOT) -> str:
     """从同批次专家、质询及三级判定确定性重建盲审 prompt。"""
     data = json.loads((base_dir / f"invest_data_{code}.json").read_text(encoding="utf-8"))
     level3_path = base_dir / f"invest_level3_{code}.json"
@@ -32,22 +54,23 @@ def expected_cross_prompt(code: str, reviewer: str,
     if not bundle_hash:
         raise ValueError("交叉盲审输入束不完整")
     level3_hash = sha256_bytes(level3_path.read_bytes())
+    if reviewer not in REVIEW_LENSES:
+        raise ValueError(f"未知独立盲审员: {reviewer}")
     corpus = []
-    for expert in EXPERTS:
+    for index, expert in enumerate(EXPERTS, 1):
         corpus.append(
-            f"\n\n===== {expert} 原报告 =====\n"
-            + (base_dir / f"invest_result_{code}_{expert}.md").read_text(encoding="utf-8")
-            + f"\n\n===== {expert} 二级质询 =====\n"
-            + (base_dir / f"invest_challenge_result_{code}_{expert}.md").read_text(encoding="utf-8")
+            f"\n\n===== 匿名领域 {index} 论证 =====\n"
+            + _blind_text((base_dir / f"invest_result_{code}_{expert}.md").read_text(encoding="utf-8"))
+            + f"\n\n===== 匿名领域 {index} 二级质询 =====\n"
+            + _blind_text((base_dir / f"invest_challenge_result_{code}_{expert}.md").read_text(encoding="utf-8"))
         )
     shared = "".join(corpus)
-    entries = json.loads((SKILL_ROOT / "data" / "experts.json").read_text(encoding="utf-8"))["experts"]
-    method = next(item["file"] for item in entries if item["id"] == reviewer)
+    method = REVIEW_LENSES[reviewer]
     data_date = str(data.get("market", {}).get("trade_date") or "")
     analysis_date = str(data.get("meta", {}).get("analysis_date") or "")
     batch_id = str(data.get("meta", {}).get("batch_id") or "")
-    prompt = f"""你是第三级交叉盲审员 `{reviewer}`。你看不到其他盲审员的结论。
-请使用 `{method}` 方法论对七份专家报告与二级质询做交叉反证。
+    prompt = f"""你是与原七位专家身份分离的第三级交叉盲审员 `{reviewer}`。你看不到其他盲审员的结论，也看不到原作者、原评分、原评级或原 verdict。
+独立审查视角：{method}。请对七组匿名论证与二级质询做交叉反证。
 只能使用下方同批次输入；新增数字事实仍须保留原报告的 [source]/[calc] 定位。
 
 身份：code={code}; data_date={data_date}; analysis_date={analysis_date}; batch_id={batch_id}
@@ -95,8 +118,8 @@ def main() -> int:
     except ValueError as exc:
         print(f"✗ {exc}", file=sys.stderr)
         return 2
-    level3_path = Path(f"/tmp/invest_level3_{code}.json")
-    data_path = Path(f"/tmp/invest_data_{code}.json")
+    level3_path = RUNTIME_ROOT / f"invest_level3_{code}.json"
+    data_path = RUNTIME_ROOT / f"invest_data_{code}.json"
     try:
         level3 = json.loads(level3_path.read_text(encoding="utf-8"))
         data = json.loads(data_path.read_text(encoding="utf-8"))
@@ -121,7 +144,7 @@ def main() -> int:
         except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
             print(f"✗ {reviewer} 交叉盲审 prompt 生成失败: {exc}", file=sys.stderr)
             return 2
-        prompts[Path(f"/tmp/invest_cross_prompt_{code}_{reviewer}.txt")] = prompt
+        prompts[RUNTIME_ROOT / f"invest_cross_prompt_{code}_{reviewer}.txt"] = prompt
 
     staged = {}
     try:
@@ -133,8 +156,8 @@ def main() -> int:
                 os.fsync(handle.fileno())
             staged[path] = temp
         for reviewer in CROSS_REVIEWERS:
-            Path(f"/tmp/invest_cross_result_{code}_{reviewer}.md").unlink(missing_ok=True)
-        Path(f"/tmp/invest_cross_blind_{code}.md").unlink(missing_ok=True)
+            (RUNTIME_ROOT / f"invest_cross_result_{code}_{reviewer}.md").unlink(missing_ok=True)
+        (RUNTIME_ROOT / f"invest_cross_blind_{code}.md").unlink(missing_ok=True)
         for path, temp in staged.items():
             os.replace(temp, path)
             print(f"✓ {path}")

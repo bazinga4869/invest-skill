@@ -1,0 +1,11 @@
+# INV-DES-03 — 2026-10-18 21:49 巡检 / cleanup 部分删除语义
+
+仅做源码静态复核；不运行 cleanup、测试或动态故障注入。
+
+- **巡检：**系统采样`2026-10-18T21:49:29+08:00`；本轮schedule occurrence `2026-10-18T13:49:29.700Z`换算`21:49:29.700+08`，约差0.7秒，只识别本次提醒，不解C145–C164历史映射。排程每1800秒，task board为空，roster仅lead运行，无其他矩阵ACK/交付。主任务IN_PROGRESS/BLOCKED、非READY_FOR_CODE，AC2/3/4/6/9未闭，candidate SHA未冻结、无同SHA QA、全量ETA未知。
+- **删除错误语义静态核：**`cleanup_intermediates()`先排序候选并逐项尝试删除（`:99-110`），单项`OSError`只累计到`errors`并继续；循环没有保存成功删除对象的备份/回滚。随后重枚举remaining（`:112-123`）。因此一部分对象可能已删除、另一部分失败并留存；函数返回errors/remaining只是报告不完整，不是原子回滚。只有在no errors/no remaining时，才考虑published marker并写receipt（`:124-149`）。这证明的是源码控制流与可能的部分完成状态，不是本机已发生部分删除。
+- **receipt语义：**receipt的`removed_count`是本次`len(removed)`（`:136`），不包含此前尝试删除但未成功的对象；若有errors，整个receipt写分支跳过。成功的receipt使用staged `open("x")`+flush/fsync+replace，但目标marker父目录以字符串排序选最后一个（`:125-147`），没有run_id入参或manifest created_at比较。目录名由assemble `run_id`时间戳格式产生（前证`assemble_report.py:629-631`）；固定zone/格式下字符串排序可能大体有序，但跨zone/历史其他名称时是否选最新未被函数保证。进一步只读核`verify_manifest.py:100-131,133-168,206-267`：它校验manifest列出的archive files与`.published.json`，未查找或读取`.cleanup.json`；`.py/.sh/references`范围搜索未发现cleanup receipt的其他消费者，仅cleanup writer自己创建（`cleanup_intermediates.py:131-147`）。故当前cleanup receipt是独立记录，不参与现有manifest验证；不作为清理完整或成功发布的验收证据。此为本次检索范围结论，不排除非代码消费者。此为契约/批次绑定待明确，不宣称错receipt已发生。
+- **错误返回对上层的影响仍需按caller区别：**assemble直接调用 cleanup后若errors/remaining返回1（`assemble_report.py:1514-1521`），而报告在之前已`os.replace`正式发布（`:1507-1509`）；它会形成“报告已发布、清理不完整、命令返回失败”的状态，不会复原已发布报告或被删中间文件。cron wrapper外层 `cleanup_tmp()`当前不检查python cleanup exit并随后打印log，因此其失败信号有被覆盖风险，详见20:19的外层责任链；需独立按脚本精确传播语义验收。均属静态，不代表实际发生。
+- **AC9建议验收（设计要求，不执行）：**(a) 活动run-state/重试中时在第一候选删除前拒绝，零删除；(b) 并发claim与cleanup检查—删除竞态采用同一锁/租约约束；(c) 中途第N个unlink/rmtree失败时明确部分删除策略——不得假称回滚，receipt不标complete，留精确removed/remaining/error审计；(d) 只在目标run已成功发布且run_id明确匹配时写该archive的receipt；(e) 外层调用检查cleanup退出码且成功标记语义不能掩盖清理失败，或明确允许“发布成功但清理失败”状态并保留相应证据；(f) receipt明确为独立清理日志，不得用manifest PASS替代cleanup完成证据，也不得假定receipt被manifest校验器消费。动态隔离故障矩阵待有权人批准并另派叶任务/独立QA。
+- **边界/执行：**未核所有调用者上游lease保护、receipt多目录历史命名分布、清理并发、mode/owner、TOCTOU和实际残留；未运行脚本、cleanup、测试、CLI、SQLite、Provider/批次；未访问runtime/报告数据/外部路径。
+- **下一责任人/动作：**@investPM（本人owner）将cleanup部分删除、lease竞态、receipt run_id绑定及外层退出码语义纳入AC9核验；全量ETA未知，动态验证须另获授权及独立QA。

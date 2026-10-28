@@ -315,23 +315,7 @@ CREATE TABLE IF NOT EXISTS macro_rates (
     UNIQUE(date, rate_type)
 );
 
--- 15. 年报/公告文本（按段落存储，便于 LLM 分段消费）
-CREATE TABLE IF NOT EXISTS annual_reports (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts_code TEXT NOT NULL,
-    report_year TEXT NOT NULL,           -- 报告年度 YYYY
-    report_type TEXT NOT NULL,           -- annual / semi-annual / q3 / notice
-    ann_date TEXT,                       -- 公告日期
-    title TEXT,                          -- 公告标题
-    section_name TEXT,                   -- 段落/章节名，如 "经营情况讨论与分析"
-    section_text TEXT,                   -- 文本内容
-    source_url TEXT,                     -- 原文链接
-    updated_at TEXT NOT NULL,
-    UNIQUE(ts_code, report_year, report_type, section_name)
-);
-CREATE INDEX IF NOT EXISTS idx_annual_reports_code_year ON annual_reports(ts_code, report_year);
-
--- 16. 业绩预告
+-- 15. 业绩预告
 CREATE TABLE IF NOT EXISTS forecast (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts_code TEXT NOT NULL,

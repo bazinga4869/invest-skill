@@ -8,10 +8,15 @@ from pathlib import Path
 
 HASH_FIELDS = (
     "data_hash", "annual_hash", "wiki_hash", "prompt_contract_hash",
-    "prompt_bundle_hash", "batch_id",
+    "prompt_bundle_hash", "report_bundle_hash", "report_corpus_hash", "sage_wiki_hash", "batch_id",
 )
 COMPONENT_FIELDS = (
     "data_hash", "annual_hash", "wiki_hash", "prompt_contract_hash", "prompt_bundle_hash",
+    "report_bundle_hash", "report_corpus_hash", "sage_wiki_hash",
+)
+PRE_REPORT_WIKI_COMPONENT_FIELDS = (
+    "data_hash", "annual_hash", "wiki_hash", "prompt_contract_hash",
+    "prompt_bundle_hash",
 )
 
 
@@ -115,6 +120,15 @@ def batch_id_from_components(components: dict) -> str:
     return _sha256_bytes(payload)[:24]
 
 
+def pre_report_wiki_batch_id_from_components(components: dict) -> str:
+    """重放 0.6 及更早归档使用的五组件 batch_id。"""
+    payload = "\0".join(
+        str(components.get(field, ""))
+        for field in PRE_REPORT_WIKI_COMPONENT_FIELDS
+    ).encode("ascii")
+    return _sha256_bytes(payload)[:24]
+
+
 def compute_batch_metadata(data: dict, annual_full: str, wiki_root: Path,
                            contract_paths: list[Path],
                            prompt_bundle_hash_value: str | None = None) -> dict[str, str]:
@@ -123,6 +137,13 @@ def compute_batch_metadata(data: dict, annual_full: str, wiki_root: Path,
         "annual_hash": _sha256_bytes(annual_full.encode("utf-8")),
         "wiki_hash": tree_hash(wiki_root),
         "prompt_contract_hash": prompt_contract_hash(contract_paths),
+        "report_bundle_hash": str(
+            data.get("meta", {}).get("report_bundle_hash") or ""
+        ),
+        "report_corpus_hash": str(
+            data.get("meta", {}).get("report_corpus_hash") or ""
+        ),
+        "sage_wiki_hash": str(data.get("meta", {}).get("sage_wiki_hash") or ""),
     }
     if prompt_bundle_hash_value is not None:
         components["prompt_bundle_hash"] = prompt_bundle_hash_value

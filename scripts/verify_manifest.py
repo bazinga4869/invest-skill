@@ -1,26 +1,40 @@
 #!/usr/bin/env python3
 """验证正式报告引用的归档 manifest 及全部文件哈希。"""
 import argparse
+import base64
 import hashlib
 import json
+import os
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import yaml
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
-REPORTS_DIR = SKILL_ROOT / "reports" / "invest_tool"
 sys.path.insert(0, str(SKILL_ROOT))
 from shared.batch_contract import (
     batch_id_from_components, canonical_data_hash, contract_snapshot_hash,
-    prompt_bundle_hash, wiki_snapshot_hash,
+    pre_report_wiki_batch_id_from_components, prompt_bundle_hash,
+    wiki_snapshot_hash,
 )
 from scripts.collect_results import validate_expert
 from scripts.collect_challenges import validate_challenge
 from scripts.collect_cross_reviews import (
     CROSS_REVIEWERS, validate_cross_aggregate,
 )
+from shared.contracts import (
+    CONTRACT_VERSION, LEGACY_CONTRACT_VERSION, PREVIOUS_CONTRACT_VERSION,
+    PRE_REPORT_WIKI_CONTRACT_VERSION, REQUIRED_REPLAY_FILES, required_replay_files,
+)
+from shared.project_config import configured_path
+from shared.report_wiki import (
+    render_annual_text, report_wiki_engine_hash, validate_report_bundle,
+)
+_reports_override = os.environ.get("INVEST_REPORTS_DIR")
+REPORTS_DIR = (Path(_reports_override).expanduser() if _reports_override
+               else configured_path("invest_tool_dir", "./reports/invest_tool"))
 EXPERTS = [
     item["id"] for item in
     json.loads((SKILL_ROOT / "data" / "experts.json").read_text(encoding="utf-8"))["experts"]
@@ -60,8 +74,14 @@ def verify(report_path: str) -> dict:
         errors.append(f"manifest ts_code 不匹配: {manifest.get('ts_code')} != {expected_code}")
     if manifest.get("run_id") != manifest_path.parent.name:
         errors.append(f"manifest run_id 与目录不一致: {manifest.get('run_id')} != {manifest_path.parent.name}")
-    if manifest.get("contract_version") != "0.5.1":
-        errors.append(f"manifest contract_version 非法: {manifest.get('contract_version')!r}")
+    contract_version = str(manifest.get("contract_version") or "")
+    if contract_version not in {
+        LEGACY_CONTRACT_VERSION, PRE_REPORT_WIKI_CONTRACT_VERSION,
+        PREVIOUS_CONTRACT_VERSION, CONTRACT_VERSION,
+    }:
+        errors.append(f"manifest contract_version 非法: {contract_version!r}")
+    is_legacy = contract_version == LEGACY_CONTRACT_VERSION
+    requires_report_wiki = contract_version in {PREVIOUS_CONTRACT_VERSION, CONTRACT_VERSION}
     entries = manifest.get("files")
     if not isinstance(entries, list) or not entries:
         errors.append("manifest files 为空")
@@ -96,6 +116,19 @@ def verify(report_path: str) -> dict:
                 errors.append("正式报告与归档副本不一致")
     if not seen_report:
         errors.append("manifest 未包含正式报告副本")
+    if contract_version == CONTRACT_VERSION:
+        publish_marker = manifest_path.parent / ".published.json"
+        try:
+            publication = json.loads(publish_marker.read_text(encoding="utf-8"))
+            archived_report_path = manifest_path.parent / report.name
+            if publication.get("schema_version") != "invest-skill.publication-receipt.v1":
+                errors.append("publication receipt schema 非法")
+            if publication.get("manifest_sha256") != sha256(manifest_path):
+                errors.append("publication receipt manifest 哈希不一致")
+            if publication.get("report_sha256") != sha256(archived_report_path):
+                errors.append("publication receipt 报告哈希不一致")
+        except (OSError, json.JSONDecodeError, AttributeError) as exc:
+            errors.append(f"publication receipt 不可复核: {exc}")
     if expected_code:
         expected_names = {
             f"invest_data_{expected_code}.json",
@@ -110,6 +143,39 @@ def verify(report_path: str) -> dict:
             "wiki_snapshot.json",
             "contract_bundle.json",
         }
+        archived_data_path = manifest_path.parent / f"invest_data_{expected_code}.json"
+        try:
+            archived_contract = json.loads(
+                archived_data_path.read_text(encoding="utf-8")
+            ).get("meta", {}).get("expert_result_contract_version")
+        except (OSError, json.JSONDecodeError):
+            archived_contract = None
+        if archived_contract == "expert-result/v3":
+            expected_names.update({
+                *{f"invest_native_prompt_{expected_code}_{expert_id}.txt" for expert_id in EXPERTS},
+                *{f"invest_result_{expected_code}_{expert_id}.v3.json" for expert_id in EXPERTS},
+            })
+        if not is_legacy:
+            expected_names.add(f"invest_execution_{expected_code}.json")
+        archived_execution = {}
+        if contract_version == CONTRACT_VERSION:
+            expected_names.update({
+                f"invest_verification_{expected_code}.json",
+                f"invest_adjudication_{expected_code}.json",
+            })
+            execution_path = manifest_path.parent / f"invest_execution_{expected_code}.json"
+            try:
+                archived_execution = json.loads(execution_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                archived_execution = {}
+            if any(
+                event.get("action") == "BEGIN_RETRY"
+                for event in (archived_execution.get("events") or [])
+                if isinstance(event, dict)
+            ):
+                expected_names.add(f"invest_retry_evidence_{expected_code}.json")
+        if requires_report_wiki:
+            expected_names.add(f"invest_report_bundle_{expected_code}.json")
         level3_path = manifest_path.parent / f"invest_level3_{expected_code}.json"
         try:
             archived_level3 = json.loads(level3_path.read_text(encoding="utf-8"))
@@ -149,7 +215,12 @@ def verify(report_path: str) -> dict:
                     )
                 if meta.get("data_hash") != canonical_data_hash(archived_data):
                     errors.append("归档数据快照 data_hash 重算不一致")
-                if data_batch != batch_id_from_components(meta):
+                recomputed_batch_id = (
+                    batch_id_from_components(meta)
+                    if requires_report_wiki
+                    else pre_report_wiki_batch_id_from_components(meta)
+                )
+                if data_batch != recomputed_batch_id:
                     errors.append("归档数据快照 batch_id 组件重算不一致")
                 wiki_snapshot_path = manifest_path.parent / "wiki_snapshot.json"
                 try:
@@ -165,13 +236,212 @@ def verify(report_path: str) -> dict:
                         contract.get("prompt_contract_files") or []
                     ) != meta.get("prompt_contract_hash"):
                         errors.append("归档 contract_bundle 与批次 prompt_contract_hash 不一致")
+                    replay_files = contract.get("replay_files")
+                    if not is_legacy:
+                        if not isinstance(replay_files, dict):
+                            errors.append("归档 contract_bundle.replay_files 非法")
+                        else:
+                            prompt_paths = {
+                                str(item.get("path") or "")
+                                for item in (contract.get("prompt_contract_files") or [])
+                                if isinstance(item, dict)
+                            }
+                            required = set(required_replay_files(contract_version))
+                            if contract_version == PRE_REPORT_WIKI_CONTRACT_VERSION:
+                                required.discard("shared/report_wiki.py")
+                            missing_replay = sorted(
+                                required - (set(replay_files) | prompt_paths)
+                            )
+                            if missing_replay:
+                                errors.append(
+                                    f"归档 replay bundle 缺少运行契约: {missing_replay}"
+                                )
+                    if contract_version == CONTRACT_VERSION:
+                        engine = (contract.get("external_engines") or {}).get("report-wiki") or {}
+                        engine_files = engine.get("files")
+                        if not isinstance(engine_files, dict) or not engine_files:
+                            errors.append("归档缺少 report-wiki 引擎源码快照")
+                        else:
+                            engine_hash = report_wiki_engine_hash(engine_files)
+                            if (engine.get("tree_hash") != engine_hash
+                                    or meta.get("report_wiki_engine_hash") != engine_hash
+                                    or meta.get("report_wiki_engine_file_count") != len(engine_files)):
+                                errors.append("归档 report-wiki 引擎身份不一致")
                 except (OSError, json.JSONDecodeError, AttributeError) as exc:
+                    contract = {}
                     errors.append(f"归档 contract_bundle 不可重算: {exc}")
+                if contract_version == CONTRACT_VERSION:
+                    receipt_path = manifest_path.parent / f"invest_verification_{expected_code}.json"
+                    execution_path = manifest_path.parent / f"invest_execution_{expected_code}.json"
+                    try:
+                        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                        contract_texts = {
+                            str(item.get("path") or ""): str(item.get("text") or "")
+                            for item in (contract.get("prompt_contract_files") or [])
+                            if isinstance(item, dict)
+                        }
+                        contract_texts.update(contract.get("replay_files") or {})
+                        verifier_text = contract_texts.get("scripts/verify_report.py")
+                        expected_verifier_hash = (
+                            hashlib.sha256(verifier_text.encode("utf-8")).hexdigest()
+                            if isinstance(verifier_text, str) else None
+                        )
+                        archived_report = manifest_path.parent / f"{expected_code}.md"
+                        if receipt.get("schema_version") != "invest-skill.verification-receipt.v1":
+                            errors.append("归档 verification receipt schema 非法")
+                        if receipt.get("ts_code") != expected_code or receipt.get("batch_id") != data_batch:
+                            errors.append("归档 verification receipt 身份不一致")
+                        if receipt.get("verdict") != "PASS":
+                            errors.append("归档 verification receipt 未通过")
+                        if receipt.get("report_sha256") != sha256(archived_report):
+                            errors.append("归档 verification receipt 报告哈希不一致")
+                        if receipt.get("data_sha256") != sha256(data_file):
+                            errors.append("归档 verification receipt 数据哈希不一致")
+                        if not expected_verifier_hash or receipt.get("verifier_sha256") != expected_verifier_hash:
+                            errors.append("归档 verification receipt 验证器哈希不一致")
+                    except (OSError, json.JSONDecodeError, AttributeError) as exc:
+                        errors.append(f"归档 verification receipt 不可复核: {exc}")
+                    adjudication_path = manifest_path.parent / f"invest_adjudication_{expected_code}.json"
+                    try:
+                        adjudication = json.loads(adjudication_path.read_text(encoding="utf-8"))
+                        draft_path = manifest_path.parent / f"{expected_code}.draft.md"
+                        draft_text = draft_path.read_text(encoding="utf-8")
+                        adjudication_match = re.search(
+                            r"^## 综合裁决 — 裁判长\s*$.*?(?=^## 裁判自检|\Z)",
+                            draft_text, re.MULTILINE | re.DOTALL,
+                        )
+                        adjudication_hash = (
+                            hashlib.sha256(adjudication_match.group(0).encode("utf-8")).hexdigest()
+                            if adjudication_match else None
+                        )
+                        expected_experts = {
+                            expert_id: sha256(manifest_path.parent / f"invest_result_{expected_code}_{expert_id}.md")
+                            for expert_id in EXPERTS
+                        }
+                        expected_challenges = {
+                            expert_id: sha256(manifest_path.parent / f"invest_challenge_result_{expected_code}_{expert_id}.md")
+                            for expert_id in EXPERTS
+                        }
+                        if (adjudication.get("schema_version") != "invest-skill.adjudication-receipt.v1"
+                                or adjudication.get("ts_code") != expected_code
+                                or adjudication.get("batch_id") != data_batch
+                                or adjudication.get("draft_sha256") != sha256(draft_path)
+                                or adjudication.get("adjudication_sha256") != adjudication_hash
+                                or adjudication.get("expert_result_sha256") != expected_experts
+                                or adjudication.get("challenge_result_sha256") != expected_challenges
+                                or adjudication.get("level3_sha256")
+                                != sha256(manifest_path.parent / f"invest_level3_{expected_code}.json")):
+                            errors.append("归档 adjudication receipt 身份或证据哈希不一致")
+                    except (OSError, json.JSONDecodeError, AttributeError) as exc:
+                        errors.append(f"归档 adjudication receipt 不可复核: {exc}")
+                    try:
+                        execution = json.loads(execution_path.read_text(encoding="utf-8"))
+                        gates_pass = any(
+                            event.get("phase") == "finalize"
+                            and event.get("action") == "GATES"
+                            and event.get("status") == "PASS"
+                            for event in (execution.get("events") or [])
+                            if isinstance(event, dict)
+                        )
+                        if not gates_pass:
+                            errors.append("归档执行元数据缺少 finalize GATES PASS")
+                    except (OSError, json.JSONDecodeError, AttributeError) as exc:
+                        errors.append(f"归档 finalize 终态不可复核: {exc}")
+                    retry_name = f"invest_retry_evidence_{expected_code}.json"
+                    if retry_name in expected_names:
+                        retry_path = manifest_path.parent / retry_name
+                        try:
+                            retry = json.loads(retry_path.read_text(encoding="utf-8"))
+                            records = retry.get("files")
+                            if (retry.get("schema_version") != "invest-skill.retry-evidence.v1"
+                                    or retry.get("ts_code") != expected_code
+                                    or retry.get("batch_id") != data_batch
+                                    or not isinstance(records, list) or not records):
+                                errors.append("归档 retry evidence ledger 身份/schema/内容非法")
+                            else:
+                                for record in records:
+                                    raw = base64.b64decode(
+                                        str(record.get("content_base64") or ""), validate=True,
+                                    )
+                                    if (record.get("bytes") != len(raw)
+                                            or record.get("sha256")
+                                            != hashlib.sha256(raw).hexdigest()):
+                                        errors.append("归档 retry evidence 内部哈希不一致")
+                                        break
+                        except (OSError, json.JSONDecodeError, ValueError, TypeError, AttributeError) as exc:
+                            errors.append(f"归档 retry evidence 不可复核: {exc}")
                 annual_path = manifest_path.parent / f"invest_annual_{expected_code}.txt"
                 if annual_path.is_file():
                     annual_hash = hashlib.sha256(annual_path.read_bytes()).hexdigest()
                     if meta.get("annual_hash") != annual_hash:
                         errors.append("归档年报 annual_hash 重算不一致")
+                if requires_report_wiki:
+                    bundle_path = (
+                        manifest_path.parent
+                        / f"invest_report_bundle_{expected_code}.json"
+                    )
+                    try:
+                        report_bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+                        report_years = int(meta.get("report_history_years"))
+                        report_types = tuple(meta.get("report_types") or [])
+                        semi_years = int(meta.get("report_semi_years") or 1)
+                        as_of = datetime.strptime(
+                            str(meta.get("analysis_date") or ""), "%Y%m%d"
+                        )
+                        bundle_problems = validate_report_bundle(
+                            report_bundle,
+                            ts_code=expected_code,
+                            as_of=as_of,
+                            years=report_years,
+                            report_types=report_types,
+                            semi_years=semi_years,
+                        )
+                        if bundle_problems:
+                            errors.append(
+                                "归档 report-wiki 证据包未通过契约: "
+                                f"{bundle_problems[:5]}"
+                            )
+                        if (annual_path.is_file()
+                                and annual_path.read_text(encoding="utf-8")
+                                != render_annual_text(report_bundle)):
+                            errors.append("归档年报与 report-wiki 证据包渲染结果不一致")
+                        report_rows = [
+                            item for item in (report_bundle.get("reports") or [])
+                            if isinstance(item, dict)
+                        ]
+                        latest_report = max(
+                            report_rows,
+                            key=lambda item: (
+                                str(item.get("announcement_date") or ""),
+                                str(item.get("fiscal_year") or ""),
+                            ),
+                        ) if report_rows else {}
+                        expected_meta = {
+                            "report_bundle_hash": report_bundle.get("bundle_hash"),
+                            "report_corpus_hash": report_bundle.get("corpus_hash"),
+                            "report_wiki_schema": report_bundle.get("schema_version"),
+                            "disclosure_query_status": "PASS",
+                            "disclosure_query_as_of": report_bundle.get("as_of"),
+                            "latest_report_period": latest_report.get("fiscal_year"),
+                            "latest_report_type": latest_report.get("report_type"),
+                            "latest_report_announcement_date": latest_report.get("announcement_date"),
+                            "market_query_trade_date": archived_data.get("market", {}).get("trade_date"),
+                        }
+                        if report_bundle.get("schema_version") == "report-wiki.bundle.v2":
+                            expected_meta.update({
+                                "report_evidence_status": report_bundle.get("evidence_status"),
+                                "report_summary_status": report_bundle.get("summary_status"),
+                                "report_search_content_hash": (
+                                    report_bundle.get("search", {}).get("content_hash")
+                                ),
+                            })
+                        for field, value in expected_meta.items():
+                            if meta.get(field) != value:
+                                errors.append(
+                                    f"归档数据快照 meta.{field} 与 report-wiki 不一致"
+                                )
+                    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+                        errors.append(f"归档 report-wiki 证据包不可重算: {exc}")
                 expected_date = str(archived_data.get("market", {}).get("trade_date") or "")
                 expected_analysis = str(meta.get("analysis_date") or "")
                 for expert_id in EXPERTS:
@@ -192,27 +462,29 @@ def verify(report_path: str) -> dict:
                         for field, expected_value in expected_fm.items():
                             if str((fm or {}).get(field) or "") != expected_value:
                                 errors.append(f"归档专家结果身份不匹配: {expert_id}.{field}")
-                        expert_problems = validate_expert(
-                            expected_code, expert_id, expected_date, data_batch,
-                            base_dir=manifest_path.parent,
-                        )
-                        if expert_problems:
-                            errors.append(
-                                f"归档专家结果未通过契约: {expert_id}: "
-                                f"{expert_problems[:3]}"
+                        if not is_legacy:
+                            expert_problems = validate_expert(
+                                expected_code, expert_id, expected_date, data_batch,
+                                base_dir=manifest_path.parent,
                             )
+                            if expert_problems:
+                                errors.append(
+                                    f"归档专家结果未通过契约: {expert_id}: "
+                                    f"{expert_problems[:3]}"
+                                )
                     if prompt_path.is_file():
                         prompt_text = prompt_path.read_text(encoding="utf-8")
                         if expected_code not in prompt_text or expert_id not in prompt_text or data_batch not in prompt_text:
                             errors.append(f"归档专家 prompt 身份不匹配: {expert_id}")
-                    challenge_problems = validate_challenge(
-                        expected_code, expert_id, base_dir=manifest_path.parent,
-                    )
-                    if challenge_problems:
-                        errors.append(
-                            f"归档质询结果未通过契约: {expert_id}: "
-                            f"{challenge_problems[:3]}"
+                    if not is_legacy:
+                        challenge_problems = validate_challenge(
+                            expected_code, expert_id, base_dir=manifest_path.parent,
                         )
+                        if challenge_problems:
+                            errors.append(
+                                f"归档质询结果未通过契约: {expert_id}: "
+                                f"{challenge_problems[:3]}"
+                            )
                 prompt_paths = {
                     f"invest_prompt_{expected_code}_{expert_id}.txt":
                     manifest_path.parent / f"invest_prompt_{expected_code}_{expert_id}.txt"

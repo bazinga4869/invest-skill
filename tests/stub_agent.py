@@ -9,6 +9,10 @@ import re
 import sys
 from pathlib import Path
 
+SKILL_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(SKILL_ROOT))
+from shared.runtime import RUNTIME_ROOT
+
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,16 +21,26 @@ from scripts.verify_report import flatten_paths
 
 
 def parse_target(path: Path, kind: str) -> tuple[str, str]:
+    name = logical_name(path)
     match = re.fullmatch(
-        rf"invest_{kind}_result_(\d{{6}}\.(?:SH|SZ|BJ))_(.+)\.md", path.name,
+        rf"invest_{kind}_result_(\d{{6}}\.(?:SH|SZ|BJ))_(.+)\.md", name,
     )
     if not match:
         raise SystemExit(f"stub: 无法解析输出路径 {path}")
     return match.group(1), match.group(2)
 
 
+def logical_name(path: Path) -> str:
+    """把生产脚本的原子 staging 文件名还原成逻辑结果文件名。"""
+    name = path.name
+    if name.startswith(".invest_") and name.endswith(".next"):
+        name = name[1:]
+        name = re.sub(r'\.\d+\.next$', '.md', name)
+    return name
+
+
 def annual_evidence(code: str) -> tuple[list[str], list[tuple[str, str]]]:
-    text = Path(f"/tmp/invest_annual_{code}.txt").read_text(encoding="utf-8")
+    text = (RUNTIME_ROOT / f"invest_annual_{code}.txt").read_text(encoding="utf-8")
     locators = []
     quotes = []
     block_pattern = re.compile(
@@ -69,7 +83,7 @@ def pick_atom(group: list[str], paths: list[str], locators: list[str]) -> str | 
 def expert_report(out: Path, code: str, expert: str) -> None:
     if os.environ.get("STUB_FAIL_EXPERT") == expert:
         raise SystemExit(1)
-    data = json.loads(Path(f"/tmp/invest_data_{code}.json").read_text(encoding="utf-8"))
+    data = json.loads((RUNTIME_ROOT / f"invest_data_{code}.json").read_text(encoding="utf-8"))
     checklist = json.loads((ROOT / "data/expert_checklist.json").read_text(encoding="utf-8"))
     rules = json.loads((ROOT / "data/checklist_evidence_rules.json").read_text(encoding="utf-8"))
     paths = sorted(flatten_paths(data))
@@ -91,7 +105,7 @@ def expert_report(out: Path, code: str, expert: str) -> None:
     latest = annual[latest_index]
     indicator = data["indicators"]["indicators"][0]
     facts = [
-        ("股价", data["market"]["close"], "", "market.close"),
+        ("股价", data["market"]["close"], "元", "market.close"),
         ("总市值", data["market"]["total_mv_yi"], "亿", "market.total_mv_yi"),
         ("PE", data["market"]["pe_ttm"], "", "market.pe_ttm"),
         ("现金", data["balance"]["cash_yi"], "亿", "balance.cash_yi"),
@@ -166,9 +180,106 @@ batch_id: "{data['meta']['batch_id']}"
     out.write_text(text, encoding="utf-8")
 
 
+def fix_prompt_diagnostics(prompt: str) -> list[dict]:
+    """Extract the structured diagnostic block injected by run_experts.sh."""
+    match = re.search(
+        r"完整 diagnostics 对象[^\n]*：\n"
+        r"(.*?)\n\n必须输出一份完整替换文档",
+        prompt,
+        re.DOTALL,
+    )
+    if not match:
+        raise SystemExit("stub: 有界修复 prompt 缺少 structured diagnostics 区块")
+    try:
+        diagnostics = json.loads(match.group(1))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"stub: structured diagnostics 不是 JSON 对象: {exc}") from exc
+    if not isinstance(diagnostics, dict):
+        raise SystemExit("stub: structured diagnostics 顶层不是 JSON 对象")
+    items = diagnostics.get("untraced_numbers", [])
+    if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+        raise SystemExit("stub: diagnostics.untraced_numbers 不是对象列表")
+    return items
+
+
+def assert_fix_diagnostics(
+    prompt: str, code: str, expert: str, pass_number: int, state_dir: Path,
+) -> str | None:
+    """Verify full diagnostics and per-pass refresh when the test opts in."""
+    initial = os.environ.get("STUB_FIX_INITIAL_SENTINEL", "")
+    refreshed = os.environ.get("STUB_FIX_REFRESH_SENTINEL", "")
+    if not initial and not refreshed:
+        return None
+    if not initial or not refreshed:
+        raise SystemExit("stub: 两个修复诊断哨兵必须同时配置")
+
+    items = fix_prompt_diagnostics(prompt)
+    raws = {str(item.get("raw", "")) for item in items}
+    if len(items) <= 8:
+        raise SystemExit(
+            f"stub: structured diagnostics 仅收到 {len(items)} 项，未越过摘要上限"
+        )
+    expected = initial if pass_number == 1 else refreshed
+    if expected not in raws:
+        raise SystemExit(
+            f"stub: 第 {pass_number} 轮 structured diagnostics 缺少末项 {expected}"
+        )
+    if pass_number >= 2 and initial in raws:
+        raise SystemExit("stub: 第二轮 structured diagnostics 仍含第一轮旧哨兵")
+
+    marker = state_dir / f"fix_diagnostics_pass_{pass_number}_{code}_{expert}.ok"
+    marker.write_text(expected, encoding="utf-8")
+    return refreshed
+
+
+def write_refreshed_diagnostic_failure(out: Path, refreshed_tail: str) -> None:
+    """Emit a new >8-item failure set so the next pass must refresh diagnostics."""
+    match = re.fullmatch(r"(\d+)(.*)", refreshed_tail)
+    if not match:
+        raise SystemExit(f"stub: 无法生成刷新诊断哨兵: {refreshed_tail!r}")
+    tail_value = int(match.group(1))
+    suffix = match.group(2)
+    start_value = tail_value - 11
+    lines = ["## 刷新后的诊断回归数据", ""]
+    lines.extend(
+        f"待修经营指标 {value}{suffix}"
+        for value in range(start_value, tail_value + 1)
+    )
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def emit_bounded_fix_failure(out: Path, code: str, expert: str, prompt: str) -> bool:
+    """按配置让前 N 个修复 pass 产出无效结果，验证真实校验回路。"""
+    try:
+        invalid_passes = int(os.environ.get("STUB_INVALID_FIX_PASSES", "0"))
+    except ValueError:
+        invalid_passes = 0
+    if invalid_passes <= 0 or "有界修复事务" not in prompt:
+        return False
+    state_dir = Path(os.environ.get("STUB_STATE_DIR", "/tmp"))
+    state_dir.mkdir(parents=True, exist_ok=True)
+    counter = state_dir / f"fix_pass_{code}_{expert}.txt"
+    try:
+        count = int(counter.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        count = 0
+    count += 1
+    counter.write_text(str(count), encoding="utf-8")
+    refreshed_tail = assert_fix_diagnostics(
+        prompt, code, expert, count, state_dir,
+    )
+    if count <= invalid_passes:
+        if refreshed_tail:
+            write_refreshed_diagnostic_failure(out, refreshed_tail)
+        else:
+            out.write_text("本轮故意输出无法通过校验的修复结果。\n", encoding="utf-8")
+        return True
+    return False
+
+
 def challenge_report(out: Path, code: str, expert: str, prompt: str) -> None:
-    original = Path(f"/tmp/invest_result_{code}_{expert}.md").read_text(encoding="utf-8")
-    data = json.loads(Path(f"/tmp/invest_data_{code}.json").read_text(encoding="utf-8"))
+    original = (RUNTIME_ROOT / f"invest_result_{code}_{expert}.md").read_text(encoding="utf-8")
+    data = json.loads((RUNTIME_ROOT / f"invest_data_{code}.json").read_text(encoding="utf-8"))
     questions = re.findall(
         r"^(?:题库问题|动态问题|缺失项/薄弱假设追问)：(.+)$", prompt, re.MULTILINE,
     )
@@ -184,9 +295,11 @@ def challenge_report(out: Path, code: str, expert: str, prompt: str) -> None:
         "我会把被质询的路径、年报原文和清单缺口分开处理，不用一项证据替代另一项证据。"
         "如果后续可验证数据显示盈利质量、现金流或管理层承诺与原推理反向，就应下调评分并重新判定。"
         "下一个可证伪点是新批次快照与同期年报定位能否同时支持该链条；任一环缺失都保持降级。"
+        "还应持续核对收入确认、费用递延和关联往来是否同步变化，并将审计措辞、经营解释与现金回收"
+        "逐项比对；若只是叙事改善而底层证据没有跟随，就不能解除原有风险约束。"
     )
     cjk = len(re.findall(r"[\u4e00-\u9fff]", response))
-    if not 150 <= cjk <= 300:
+    if not 180 <= cjk <= 360:
         raise SystemExit(f"stub: 质询回应字数 {cjk}")
     text = f"""---
 expert_id: "{expert}"
@@ -207,7 +320,7 @@ challenge_verdict: UNCHANGED
 2. {questions[1]}
 3. {questions[2]}
 
-## 合并回应（150-300 个中文字符）
+## 合并回应（180-360 个中文字符）
 
 {response}
 """
@@ -262,9 +375,10 @@ cross_verdict: CONFIRM
 def main() -> None:
     out = Path(sys.argv[1])
     prompt = sys.stdin.read()
+    name = logical_name(out)
     kind = (
-        "challenge" if out.name.startswith("invest_challenge_result_")
-        else "cross" if out.name.startswith("invest_cross_result_") else ""
+        "challenge" if name.startswith("invest_challenge_result_")
+        else "cross" if name.startswith("invest_cross_result_") else ""
     )
     if kind == "challenge":
         code, expert = parse_target(out, "challenge")
@@ -273,10 +387,12 @@ def main() -> None:
         code, reviewer = parse_target(out, "cross")
         cross_report(out, code, reviewer, prompt)
     else:
-        match = re.fullmatch(r"invest_result_(\d{6}\.(?:SH|SZ|BJ))_(.+)\.md", out.name)
+        match = re.fullmatch(r"invest_result_(\d{6}\.(?:SH|SZ|BJ))_(.+)\.md", name)
         if not match:
             raise SystemExit(f"stub: 无法解析输出路径 {out}")
-        expert_report(out, match.group(1), match.group(2))
+        code, expert = match.groups()
+        if not emit_bounded_fix_failure(out, code, expert, prompt):
+            expert_report(out, code, expert)
 
 
 if __name__ == "__main__":

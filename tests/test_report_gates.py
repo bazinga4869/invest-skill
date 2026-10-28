@@ -1,13 +1,17 @@
 import json
 import hashlib
+import io
+import math
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
+from scripts import collect_results as collect_results_module
 from scripts.assemble_report import (
-    evaluate_level3, validate_adjudication, validate_devil_challenge,
-    validate_self_review,
+    WIKI_ROOT, evaluate_level3, validate_adjudication, validate_devil_challenge,
 )
 from scripts.collect_challenges import validate_challenge
 from scripts.collect_cross_reviews import (
@@ -16,24 +20,267 @@ from scripts.collect_cross_reviews import (
 )
 from scripts.collect_results import (
     _annual_locator_section_text, _meaningful_table_rows, _verified_narrative_rows,
+    build_expert_diagnostics, trace_data_numbers, untraced_number_diagnostics,
 )
 from scripts.prepare_cross_reviews import expected_cross_prompt
+from scripts.prepare_prompts import (
+    MAX_EXPERT_PROMPT_BYTES, build_evidence_cards, format_annual_text,
+)
 from scripts.verify_report import (
-    calculation_specs, detect_unsourced, explicit_sources, extract_numbers, flatten_json,
-    verify, verify_number,
+    calculation_specs, detect_unsourced, evaluate_calculation, explicit_sources,
+    extract_numbers, flatten_json, normalize_calculation_formula, verify, verify_number,
 )
 from scripts.verify_manifest import verify as verify_manifest
 from scripts.verify_manifest import EXPERTS as MANIFEST_EXPERTS
 from shared.batch_contract import (
     batch_id_from_components, canonical_data_hash, compute_batch_metadata,
-    contract_snapshot_hash, prompt_bundle_hash, validate_batch_metadata,
+    contract_snapshot_hash, pre_report_wiki_batch_id_from_components,
+    prompt_bundle_hash, validate_batch_metadata,
     wiki_snapshot_hash,
 )
 from shared.checklist_verify import check_expert_coverage, load_checklist
+from shared.contracts import (
+    CONTRACT_VERSION, LEGACY_CONTRACT_VERSION,
+    PRE_REPORT_WIKI_CONTRACT_VERSION, REQUIRED_REPLAY_FILES,
+)
 from shared.review_contracts import challenge_prompt_hash, cross_prompt_hash
 
 
 class ReportGateTests(unittest.TestCase):
+    def test_html_manifest_comment_is_not_a_data_assertion(self):
+        findings = extract_numbers(
+            "<!-- artifact_manifest: artifacts/603605.SH/20260824T190911151940+0800/manifest.json -->"
+        )
+        self.assertEqual(findings, [])
+
+    def test_inline_code_number_keeps_unit_and_source(self):
+        findings = extract_numbers(
+            "收盘价为 `61.29` 元 [source: market.close]；"
+            "景气为 `50.3 [source: macro.pmi]`"
+        )
+        source_map = {"market.close": (61.29, "元"), "macro.pmi": (50.3, "")}
+        self.assertEqual([item["unit"] for item in findings], ["元", ""])
+        self.assertTrue(all(
+            verify_number(item, source_map)["trace_status"] == "DIRECT"
+            for item in findings
+        ))
+
+    def test_yuan_symbol_is_currency_unit(self):
+        finding = extract_numbers("最新股价 ¥61.29 [source: market.close]")[0]
+        self.assertEqual(finding["unit"], "元")
+        self.assertEqual(
+            verify_number(finding, {"market.close": (61.29, "元")})["trace_status"],
+            "DIRECT",
+        )
+
+    def test_json_paths_are_allowed_inside_calc_formula(self):
+        spec = calculation_specs(
+            "3.0 [calc: annual.profit/market.shares; "
+            "inputs: annual.profit,market.shares]"
+        )[0]
+        self.assertEqual(evaluate_calculation(
+            spec, {"annual.profit": (15.0, "亿"), "market.shares": (5.0, "亿")}
+        ), 3.0)
+
+    def test_semantic_calc_aliases_bind_by_declared_input_order(self):
+        self.assertEqual(evaluate_calculation(
+            {"formula": "fcf/revenue", "inputs": ["cash.fcf", "income.revenue"]},
+            {"cash.fcf": (12.0, "亿"), "income.revenue": (60.0, "亿")},
+        ), 0.2)
+        self.assertEqual(evaluate_calculation(
+            {"formula": "1/x", "inputs": ["market.pe"]},
+            {"market.pe": (20.0, "倍")},
+        ), 0.05)
+
+    def test_calc_normalizes_output_assignment_without_weakening_dependencies(self):
+        self.assertEqual(
+            normalize_calculation_formula("earnings_yield=1/pe"), "1/pe",
+        )
+        self.assertEqual(evaluate_calculation(
+            {"formula": "earnings_yield=1/pe", "inputs": ["market.pe"]},
+            {"market.pe": (20.0, "倍")},
+        ), 0.05)
+        self.assertIsNone(evaluate_calculation(
+            {"formula": "result=pe/pe", "inputs": ["market.pe"]},
+            {"market.pe": (20.0, "倍")},
+        ))
+
+    def test_calc_normalizes_unambiguous_interfix_multiplication(self):
+        formula = "sqrt(22.5xEPSx(EQUITY/SHARES))"
+        self.assertEqual(
+            normalize_calculation_formula(formula),
+            "sqrt(22.5*EPS*(EQUITY/SHARES))",
+        )
+        self.assertAlmostEqual(evaluate_calculation(
+            {"formula": formula, "inputs": ["market.eps", "balance.equity", "market.shares"]},
+            {
+                "market.eps": (2.0, "元"),
+                "balance.equity": (40.0, "亿"),
+                "market.shares": (5.0, "亿"),
+            },
+        ), math.sqrt(360.0))
+        self.assertEqual(normalize_calculation_formula("x1/x2"), "x1/x2")
+
+    def test_calc_rejects_duplicate_inputs_and_resource_heavy_power(self):
+        source_map = {"metric.a": (2.0, ""), "metric.b": (3.0, "")}
+        self.assertIsNone(evaluate_calculation(
+            {"formula": "x1+x2", "inputs": ["metric.a", "metric.a"]},
+            source_map,
+        ))
+        self.assertIsNone(evaluate_calculation(
+            {"formula": "x1**1000000", "inputs": ["metric.a"]},
+            source_map,
+        ))
+        self.assertEqual(evaluate_calculation(
+            {"formula": "x1**2", "inputs": ["metric.a"]},
+            source_map,
+        ), 4.0)
+
+    def test_bare_calc_operands_remain_untraced_but_result_is_derived(self):
+        text = (
+            "21.93/14.98=1.46 [calc: current/previous; inputs: "
+            "metrics.numerator,metrics.denominator]"
+        )
+        checked = trace_data_numbers(text, flatten_json({
+            "metrics": {"numerator": 21.93, "denominator": 14.98},
+        }))
+        self.assertEqual(
+            [(item["raw"], item["trace_status"]) for item in checked],
+            [("21.93", "UNTRACED"), ("14.98", "UNTRACED"), ("1.46", "DERIVED")],
+        )
+
+    def test_untraced_number_diagnostics_are_not_limited_to_eight(self):
+        text = "\n".join(f"经营指标 {100 + index}亿" for index in range(12))
+        diagnostics = untraced_number_diagnostics(text, {})
+        self.assertEqual(len(diagnostics), 12)
+        self.assertTrue(all(
+            {"line", "raw", "context", "value_only_candidates"} <= item.keys()
+            for item in diagnostics
+        ))
+
+    def test_all_enumerable_diagnostics_exceed_problem_summary_limits(self):
+        out_of_domain_items = [{
+            "item": f"域外证据{index}", "found": True,
+            "evidence": f"market.metric_{index}", "conclusion": "已核对",
+            "status": "DONE",
+        } for index in range(6)]
+        invalid_evidence_items = [{
+            "item": f"无效证据{index}", "found": True,
+            "evidence": f"annual.missing_{index}", "conclusion": "已核对",
+            "status": "DONE",
+        } for index in range(6)]
+        checklist_items = out_of_domain_items + invalid_evidence_items
+        rows = [
+            f"| {item['item']} | DONE | `{item['evidence']}` | 已核对 |"
+            for item in checklist_items
+        ]
+        invalid_sources = [
+            f"异常指标 100亿 [source: absent.path_{index}]"
+            for index in range(7)
+        ]
+        invalid_calculations = [
+            "推导值 1.0 [calc: current/previous; inputs: "
+            f"absent.calc_a_{index},absent.calc_b_{index}]"
+            for index in range(5)
+        ]
+        text = "\n".join([
+            *rows,
+            *invalid_sources,
+            *invalid_calculations,
+            *("公司无商誉。" for _ in range(7)),
+            *("行业平均水平仍在改善。" for _ in range(7)),
+        ])
+        data = {
+            "market": {f"metric_{index}": index + 1 for index in range(6)},
+            "balance": {"goodwill_yi": None},
+        }
+        checklist_result = {
+            "items": checklist_items, "covered": len(checklist_items),
+            "total": len(checklist_items),
+        }
+
+        diagnostics = build_expert_diagnostics(
+            "financial-auditor", text, data,
+            checklist_result=checklist_result,
+        )
+
+        self.assertEqual(len(diagnostics["invalid_sources"]), 7)
+        self.assertEqual(len(diagnostics["invalid_calculations"]), 5)
+        self.assertEqual(len(diagnostics["invalid_checklist_evidence"]), 6)
+        self.assertEqual(len(diagnostics["out_of_domain_checklist_evidence"]), 6)
+        self.assertEqual(len(diagnostics["qualitative_contradictions"]), 7)
+        self.assertEqual(len(diagnostics["unsourced_claims"]), 7)
+        self.assertTrue(all(
+            {"path", "line", "context"} <= item.keys()
+            for item in diagnostics["invalid_sources"]
+        ))
+        self.assertTrue(all(
+            {"formula", "inputs", "line", "context"} <= item.keys()
+            for item in diagnostics["invalid_calculations"]
+        ))
+
+    def test_failing_json_includes_structured_diagnostics(self):
+        expert_id = "financial-auditor"
+        diagnostics = {"untraced_numbers": [{
+            "line": 7, "raw": "21.93", "context": "21.93/14.98=1.46",
+            "value_only_candidates": ["metrics.numerator"],
+        }]}
+        stdout = io.StringIO()
+        with patch("sys.argv", [
+            "collect_results.py", "603605.SH", "--expert", expert_id,
+            "--failing", "--json",
+        ]), patch.object(
+            collect_results_module, "expected_data_date", return_value="20260803"
+        ), patch.object(
+            collect_results_module, "expected_batch_id", return_value="batch"
+        ), patch.object(
+            collect_results_module, "validate_expert", return_value=["problem"]
+        ), patch.object(
+            collect_results_module, "load_expert_diagnostics", return_value=diagnostics
+        ), redirect_stdout(stdout):
+            self.assertEqual(collect_results_module.main(), 1)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload[expert_id]["problems"], ["problem"])
+        self.assertEqual(payload[expert_id]["diagnostics"], diagnostics)
+
+    def test_method_tag_marks_threshold_as_non_data(self):
+        findings = extract_numbers(
+            "警戒线为 0.7 [method: 财务排雷官现金转化警戒线]"
+        )
+        self.assertEqual(findings[0]["category"], "assumption")
+
+    def test_nearest_semantic_label_wins_in_multi_metric_sentence(self):
+        findings = extract_numbers(
+            "公司利润仍正，资产负债率为 26.1% "
+            "[source: indicators.debt_ratio_pct]"
+        )
+        checked = verify_number(
+            findings[0], {"indicators.debt_ratio_pct": (26.1, "%")}
+        )
+        self.assertEqual(checked["trace_status"], "DIRECT")
+
+    def test_non_recurring_ratio_phrase_uses_longer_semantic_label(self):
+        source_map = flatten_json({
+            "annual": {"annual_data": [{"non_recurring_pct": 0.1}]},
+        })
+        correct = extract_numbers(
+            "非经常性损益占净利润为 0.1% "
+            "[source: annual.annual_data[0].non_recurring_pct]"
+        )[0]
+        wrong = extract_numbers(
+            "净利润为 0.1% "
+            "[source: annual.annual_data[0].non_recurring_pct]"
+        )[0]
+        compound_wrong = extract_numbers(
+            "非经常性损益占净利润的比例下降，但净利润同比增长为 0.1% "
+            "[source: annual.annual_data[0].non_recurring_pct]"
+        )[0]
+        self.assertEqual(verify_number(correct, source_map)["trace_status"], "DIRECT")
+        self.assertEqual(verify_number(wrong, source_map)["trace_status"], "UNTRACED")
+        self.assertEqual(
+            verify_number(compound_wrong, source_map)["trace_status"], "UNTRACED",
+        )
+
     def test_six_digit_business_fact_is_not_hidden_as_stock_code(self):
         facts = extract_numbers("营收为123456元，用户数123456")
         self.assertEqual([(item["value"], item["category"]) for item in facts], [
@@ -89,6 +336,16 @@ class ReportGateTests(unittest.TestCase):
         invalid = f"| {item} | DONE | `JSON.path` | 一句话结论 |"
         self.assertEqual(check_expert_coverage(expert_id, valid, checklist)["covered"], 1)
         self.assertEqual(check_expert_coverage(expert_id, invalid, checklist)["covered"], 0)
+
+    def test_checklist_conclusion_need_not_repeat_item_name(self):
+        checklist = load_checklist()
+        expert_id = "management-auditor"
+        item = "管理层诚信记录"
+        row = (
+            f"| {item} | DONE | `audit.has_audit`; "
+            "`年报:2025/annual/公司治理` | 现有材料未发现重大处罚，缺口已降级 |"
+        )
+        self.assertEqual(check_expert_coverage(expert_id, row, checklist)["covered"], 1)
 
     def test_honest_missing_row_never_counts_as_executed(self):
         checklist = load_checklist()
@@ -286,6 +543,23 @@ class ReportGateTests(unittest.TestCase):
             [],
         )
 
+    def test_negative_industry_disclosure_is_not_a_false_positive(self):
+        self.assertEqual(
+            detect_unsourced("无法进行任何行业横向对比，全文未做‘行业平均’断言。"),
+            [],
+        )
+        self.assertEqual(detect_unsourced("不能使用行业平均或行业分位。"), [])
+        self.assertEqual(detect_unsourced("因此不使用行业平均、分位或相对排名。"), [])
+        self.assertEqual(
+            detect_unsourced("可比统计仅作背景，不据此编造行业平均或普遍规律。"), [],
+        )
+        self.assertTrue(detect_unsourced(
+            "不使用行业平均但行业普遍增长，故维持正面判断。"
+        ))
+        self.assertEqual(detect_unsourced(
+            "不使用行业平均但也不声称行业普遍增长。"
+        ), [])
+
     def test_verify_rejects_unknown_quality_and_identity_mismatch(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -311,6 +585,10 @@ class ReportGateTests(unittest.TestCase):
             contract.write_text("prompt-v1", encoding="utf-8")
             checklist.write_text("{}", encoding="utf-8")
             data = {"market": {"close": 10}, "meta": {}}
+            data["meta"].update({
+                "report_bundle_hash": "a" * 64,
+                "report_corpus_hash": "b" * 64,
+            })
             data["meta"].update(compute_batch_metadata(
                 data, "annual-v1", wiki, [contract, checklist]
             ))
@@ -318,6 +596,11 @@ class ReportGateTests(unittest.TestCase):
                 data, "annual-v1", wiki, [contract, checklist]
             ), [])
             data["market"]["close"] = 11
+            self.assertTrue(validate_batch_metadata(
+                data, "annual-v1", wiki, [contract, checklist]
+            ))
+            data["market"]["close"] = 10
+            data["meta"]["report_bundle_hash"] = "c" * 64
             self.assertTrue(validate_batch_metadata(
                 data, "annual-v1", wiki, [contract, checklist]
             ))
@@ -340,35 +623,9 @@ class ReportGateTests(unittest.TestCase):
                 result = verify(str(report), str(data))
             self.assertEqual(result["date_issues"], [])
 
-    def test_self_review_requires_exact_section_and_pass_line(self):
-        valid = """## 综合裁决 — 裁判长
-
-裁决正文。
-
-## 结构化自评审
-
-| 维度 | 得分 |
-|---|---:|
-| 数据可追溯性 | 20 / 25 |
-| 方法论忠实度 | 20 / 25 |
-| 裁判诚实性与一致性 | 20 / 25 |
-| 逻辑与表述 | 12 / 15 |
-
-### 扣分明细
-- 数据缺口扣分。
-
-**总分：72 / 90**
-
-**判定：PASS**
-"""
-        self.assertEqual(validate_self_review(valid), [])
-        self.assertTrue(validate_self_review("**总分：72 / 90**\nBYPASS"))
-        self.assertTrue(validate_self_review(
-            "## 结构化自评审\n\n**总分：91 / 90**\n\n**判定：PASS**"
-        ))
-
     def test_adjudication_yaml_is_structurally_validated(self):
-        valid = """## 综合裁决 — 裁判长
+        knowledge_hash = hashlib.sha256((WIKI_ROOT / "index.md").read_bytes()).hexdigest()
+        valid = f"""## 综合裁决 — 裁判长
 
 ```yaml
 ---
@@ -379,11 +636,15 @@ adjudicator:
   vetoes_triggered: []
   review_resolutions: []
   position_advice:
+    existing_position_action: ADD
+    new_allocation_pct: 5
     max_allocation_pct: 10
     entry_strategy: 分批建仓
     stop_conditions: [基本面恶化]
   watch_items: [收入增速]
-  knowledge_refs: [index.md, experts/01-财务排雷官.md, experts/02-价值估值师.md]
+  knowledge_refs:
+    - path: index.md
+      sha256: {knowledge_hash}
 ---
 ```
 
@@ -416,7 +677,7 @@ adjudicator:
             ]
             contract_bundle = {
                 "prompt_contract_files": prompt_contract_files,
-                "replay_files": {},
+                "replay_files": {name: "fixture" for name in REQUIRED_REPLAY_FILES},
             }
             archived_data = {
                 "market": {"trade_date": "20200102"},
@@ -428,7 +689,9 @@ adjudicator:
                 },
             }
             archived_data["meta"]["data_hash"] = canonical_data_hash(archived_data)
-            provisional_batch = batch_id_from_components(archived_data["meta"])
+            provisional_batch = pre_report_wiki_batch_id_from_components(
+                archived_data["meta"]
+            )
             batch_sentinel = "__BATCH_ID_PLACEHOLDER__"
             provisional_prompts = {
                 f"invest_prompt_000001.SZ_{expert}.txt":
@@ -438,7 +701,9 @@ adjudicator:
             archived_data["meta"]["prompt_bundle_hash"] = prompt_bundle_hash(
                 provisional_prompts, batch_sentinel,
             )
-            archived_data["meta"]["batch_id"] = batch_id_from_components(archived_data["meta"])
+            archived_data["meta"]["batch_id"] = pre_report_wiki_batch_id_from_components(
+                archived_data["meta"]
+            )
             batch_id = archived_data["meta"]["batch_id"]
             expert_texts = {
                 expert: (
@@ -469,7 +734,7 @@ adjudicator:
                 *[f"invest_result_000001.SZ_{expert}.md" for expert in MANIFEST_EXPERTS],
                 *[f"invest_challenge_prompt_000001.SZ_{expert}.txt" for expert in MANIFEST_EXPERTS],
                 *[f"invest_challenge_result_000001.SZ_{expert}.md" for expert in MANIFEST_EXPERTS],
-                "invest_level3_000001.SZ.json",
+                "invest_level3_000001.SZ.json", "invest_execution_000001.SZ.json",
                 "wiki_snapshot.json", "contract_bundle.json",
             ]
             for name in evidence_names:
@@ -497,6 +762,8 @@ adjudicator:
                     content = challenge_texts[expert].encode()
                 elif name == "invest_level3_000001.SZ.json":
                     content = json.dumps(level3).encode()
+                elif name == "invest_execution_000001.SZ.json":
+                    content = json.dumps({"batch_id": batch_id, "phases": {}}).encode()
                 elif name == "wiki_snapshot.json":
                     content = json.dumps(wiki_snapshot).encode()
                 elif name == "contract_bundle.json":
@@ -506,7 +773,7 @@ adjudicator:
             manifest = {
                 "ts_code": "000001.SZ",
                 "run_id": "run",
-                "contract_version": "0.5.1",
+                "contract_version": PRE_REPORT_WIKI_CONTRACT_VERSION,
                 "batch_id": batch_id,
                 "files": [
                     {
@@ -521,6 +788,20 @@ adjudicator:
             with patch("scripts.verify_manifest.REPORTS_DIR", root), patch(
                 "scripts.verify_manifest.validate_expert", return_value=[]
             ), patch("scripts.verify_manifest.validate_challenge", return_value=[]):
+                self.assertEqual(verify_manifest(str(report))["status"], "PASS")
+                # 历史合同按其自身证据要求验证，不追罚 0.6 才新增的执行元数据。
+                legacy_manifest = json.loads(
+                    (archive / "manifest.json").read_text(encoding="utf-8")
+                )
+                legacy_manifest["contract_version"] = LEGACY_CONTRACT_VERSION
+                legacy_manifest["files"] = [
+                    item for item in legacy_manifest["files"]
+                    if item["name"] != "invest_execution_000001.SZ.json"
+                ]
+                (archive / "invest_execution_000001.SZ.json").unlink()
+                (archive / "manifest.json").write_text(
+                    json.dumps(legacy_manifest), encoding="utf-8"
+                )
                 self.assertEqual(verify_manifest(str(report))["status"], "PASS")
                 archived.write_text("tampered", encoding="utf-8")
                 self.assertEqual(verify_manifest(str(report))["status"], "FAIL")
@@ -540,6 +821,16 @@ adjudicator:
         }]}
         self.assertEqual(verify_number(cancelled, source_map)["trace_status"], "UNTRACED")
         self.assertEqual(verify_number(identity, source_map)["trace_status"], "UNTRACED")
+
+    def test_legitimate_dupont_decomposition_allows_internal_cancellation(self):
+        source_map = {
+            "margin": (0.2, ""), "revenue": (100.0, "亿"),
+            "assets": (80.0, "亿"), "equity": (40.0, "亿"),
+        }
+        self.assertEqual(evaluate_calculation({
+            "formula": "x1*(x2/x3)*(x3/x4)",
+            "inputs": ["margin", "revenue", "assets", "equity"],
+        }, source_map), 0.5)
 
     def test_legitimate_multi_input_ratio_remains_valid(self):
         source_map = flatten_json({"annual": {"profit": 20, "revenue": 100}})
@@ -564,6 +855,117 @@ adjudicator:
         self.assertTrue(detect_unsourced(line, small))
         self.assertEqual(detect_unsourced(line, enough), [])
 
+    def test_historical_extremum_accepts_complete_cross_paragraph_evidence(self):
+        data = {"annual": {"annual_data": [
+            {"year": 2022, "revenue_yi": 10},
+            {"year": 2023, "revenue_yi": 12},
+            {"year": 2024, "revenue_yi": 15},
+        ]}}
+        text = "\n".join([
+            "年度序列：10亿 [source: annual.annual_data[0].revenue_yi]",
+            "年度序列：12亿 [source: annual.annual_data[1].revenue_yi]",
+            "年度序列：15亿 [source: annual.annual_data[2].revenue_yi]",
+            "因此营收创历史新高 [history-check: annual.annual_data[*].revenue_yi]。",
+        ])
+        self.assertEqual(detect_unsourced(text, flatten_json(data)), [])
+
+    def test_historical_extremum_rejects_incomplete_or_false_evidence(self):
+        complete = {"annual": {"annual_data": [
+            {"year": 2022, "revenue_yi": 10},
+            {"year": 2023, "revenue_yi": 18},
+            {"year": 2024, "revenue_yi": 15},
+        ]}}
+        incomplete_text = "\n".join([
+            "10亿 [source: annual.annual_data[0].revenue_yi]",
+            "15亿 [source: annual.annual_data[2].revenue_yi]",
+            "营收创历史新高 [history-check: annual.annual_data[*].revenue_yi]。",
+        ])
+        false_text = "\n".join([
+            "10亿 [source: annual.annual_data[0].revenue_yi]",
+            "18亿 [source: annual.annual_data[1].revenue_yi]",
+            "15亿 [source: annual.annual_data[2].revenue_yi]",
+            "营收创历史新高 [history-check: annual.annual_data[*].revenue_yi]。",
+        ])
+        source_map = flatten_json(complete)
+        self.assertTrue(detect_unsourced(incomplete_text, source_map))
+        self.assertTrue(detect_unsourced(false_text, source_map))
+
+    def test_historical_claim_requires_explicit_metric_and_standard_tag(self):
+        data = {"annual": {"annual_data": [
+            {"year": 2022, "revenue_yi": 10},
+            {"year": 2023, "revenue_yi": 12},
+            {"year": 2024, "revenue_yi": 15},
+        ]}}
+        sources = " ".join(
+            f"[source: annual.annual_data[{index}].revenue_yi]"
+            for index in range(3)
+        )
+        self.assertTrue(detect_unsourced(
+            f"{sources}\n业绩创历史新高 [history-check: annual.annual_data[*].revenue_yi]",
+            flatten_json(data),
+        ))
+        self.assertTrue(detect_unsourced(
+            f"{sources}\n营收创历史新高", flatten_json(data),
+        ))
+        self.assertTrue(detect_unsourced(
+            "公司营收连续三年增长。", flatten_json(data),
+        ))
+
+    def test_quoted_management_historical_claim_is_not_expert_endorsement(self):
+        line = (
+            "管理层原话：“营业收入创历史新高”。"
+            "（年报:2024/annual/管理层讨论与分析）"
+        )
+        annual = (
+            "### 2024年 annual（公告日：20250301）\n"
+            "#### 管理层讨论与分析\n"
+            "公司管理层表示营业收入创历史新高。\n"
+        )
+        self.assertEqual(detect_unsourced(line, {}, annual), [])
+        self.assertTrue(detect_unsourced(line, {}, annual.replace("历史新高", "保持增长")))
+
+    def test_prompt_evidence_cards_expose_exact_quarterly_semantics(self):
+        cards = build_evidence_cards({
+            "market": {"close": 10},
+            "balance": {},
+            "annual": {"annual_data": []},
+            "quarterly": {"periods": [{
+                "period": "20250331", "ocf_yi": -1.67, "ocf_ytd_yi": 40.12,
+            }]},
+            "indicators": {"indicators": []},
+        }, "financial-auditor")
+        self.assertIn("ocf=-1.67 `quarterly.periods[0].ocf_yi`", cards)
+        self.assertIn("ocf=40.12 `quarterly.periods[0].ocf_ytd_yi`", cards)
+        self.assertIn("`*_yi` 是还原单季，`*_ytd_yi` 是年内累计", cards)
+
+    def test_latest_report_summary_accepts_h1_period_keys(self):
+        from scripts.prepare_prompts import latest_report_summary
+        rows = [(
+            "2026H1", "semi", "管理层讨论与分析", "正文",
+            "20260824", "珀莱雅化妆品股份有限公司2026年半年度报告",
+        )]
+        summary = latest_report_summary(
+            rows, datetime(2026, 8, 24), prefer_semi=True,
+        )
+        self.assertIn("2026年半年报", summary)
+        self.assertIn("20260824发布", summary)
+
+    def test_annual_prompt_excerpt_is_bounded_and_keeps_locator_heading(self):
+        rows = [
+            (2025, "annual", "管理层讨论与分析", "营业收入增长。" * 3000,
+             "20260331", "2025年年度报告"),
+            (2024, "annual", "管理层讨论与分析", "战略与风险变化。" * 3000,
+             "20250331", "2024年年度报告"),
+            (2025, "q1", "管理层讨论与分析", "季度正文" * 3000,
+             "20250430", "2025年一季度报告"),
+        ]
+        excerpt = format_annual_text(rows, "financial-auditor")
+        self.assertLessEqual(len(excerpt), MAX_EXPERT_PROMPT_BYTES)
+        self.assertIn("### 2025年 annual", excerpt)
+        self.assertIn("#### 管理层讨论与分析", excerpt)
+        self.assertNotIn("2025年 q1", excerpt)
+        self.assertIn("较早年度证据摘录", excerpt)
+
     def test_level3_machine_trigger_and_exact_embedding(self):
         scoring = {
             "weights": {
@@ -584,6 +986,32 @@ adjudicator:
             level3["industry_history_status"],
             "MISSING_CURRENT_INDUSTRY_OR_DIRECTION",
         )
+
+    def test_level3_nonneutral_challenge_triggers_blind_review(self):
+        scoring = {
+            "weights": {
+                "financial-auditor": .2, "value-valuator": .2,
+                "growth-assessor": .15, "moat-analyst": .15,
+                "management-auditor": .15, "macro-cyclist": .15,
+            },
+            "cognitive_adjustment": {"VETO": .5, "WARN": .8},
+        }
+        results = {
+            expert: "---\nscore: 60\nverdict: WARN\nconclusion_direction: NEUTRAL\n---\n"
+            for expert in MANIFEST_EXPERTS
+        }
+        challenges = {
+            expert: (
+                "---\nchallenge_verdict: DOWNGRADED\n---\n回应"
+                if expert == "moat-analyst"
+                else "---\nchallenge_verdict: UNCHANGED\n---\n回应"
+            )
+            for expert in MANIFEST_EXPERTS
+        }
+        level3 = evaluate_level3(results, scoring, challenges=challenges)
+        self.assertTrue(level3["nonneutral_challenge_triggered"])
+        self.assertEqual(level3["nonneutral_challenges"], ["moat-analyst"])
+        self.assertTrue(level3["triggered"])
 
     def test_level3_three_verified_industry_oppositions_trigger(self):
         scoring = {
@@ -614,9 +1042,17 @@ adjudicator:
                 digest = hashlib.sha256((run / name).read_bytes()).hexdigest()
                 manifest = {
                     "run_id": f"run{index}", "created_at": f"2026-01-0{index + 1}",
+                    "ts_code": f"code{index}",
                     "files": [{"name": name, "sha256": digest}],
                 }
-                (run / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+                manifest_path = run / "manifest.json"
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                report_path = run / f"code{index}.md"
+                report_path.write_text("published", encoding="utf-8")
+                (run / ".published.json").write_text(json.dumps({
+                    "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+                    "report_sha256": hashlib.sha256(report_path.read_bytes()).hexdigest(),
+                }), encoding="utf-8")
             level3 = evaluate_level3(results, scoring, "化妆品", root)
         self.assertTrue(level3["industry_three_run_opposition"])
         self.assertEqual(level3["industry_opposition_experts"], ["value-valuator"])

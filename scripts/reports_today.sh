@@ -14,9 +14,10 @@
 set -euo pipefail
 
 SKILL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-REPORT_DIR="$SKILL_ROOT/reports/invest_tool"
-ACTIVITY_LOG="$SKILL_ROOT/logs/activity.jsonl"
-DATE="${1:-today}"
+RUNTIME_ROOT="${INVEST_SKILL_HOME:-$(cd "$SKILL_ROOT" && python3 -c 'from shared.project_config import runtime_root; print(runtime_root())')}"
+REPORT_DIR="${INVEST_REPORTS_DIR:-$(cd "$SKILL_ROOT" && python3 -c 'from shared.project_config import configured_path; print(configured_path("invest_tool_dir", "./reports/invest_tool"))')}"
+ACTIVITY_LOG="${INVEST_LOG_DIR:-$RUNTIME_ROOT/logs}/activity.jsonl"
+DATE=""
 OUTPUT_FORMAT="markdown"
 
 # --- 参数解析 ---
@@ -33,6 +34,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+DATE="${DATE:-today}"
 if [[ "$DATE" == "today" ]]; then
     DATE=$(date +%Y-%m-%d)
 fi
@@ -52,7 +54,7 @@ fi
 check_failures() {
     local date="$1"
     local format="$2"  # markdown or json
-    local activity_log="$SKILL_ROOT/logs/activity.jsonl"
+    local activity_log="${INVEST_LOG_DIR:-$RUNTIME_ROOT/logs}/activity.jsonl"
 
     if [[ ! -f "$activity_log" ]]; then
         return
@@ -145,7 +147,6 @@ if [[ ${#REPORTS[@]} -eq 0 ]]; then
     echo "## 今日活动日志"
     if [[ -f "$ACTIVITY_LOG" ]]; then
         grep "$DATE" "$ACTIVITY_LOG" 2>/dev/null | while IFS= read -r line; do
-            phase msg
             phase=$(echo "$line" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('phase','?'))" 2>/dev/null || echo "?")
             msg=$(echo "$line" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('msg',''))" 2>/dev/null || echo "")
             echo "- \`$phase\` $msg"

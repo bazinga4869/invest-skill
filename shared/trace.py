@@ -23,7 +23,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
-TRACE_DIR = SKILL_ROOT / "logs" / "trace"
+from shared.project_config import runtime_root  # noqa: E402
+
+TRACE_DIR = runtime_root() / "logs" / "trace"
 
 
 class Trace:

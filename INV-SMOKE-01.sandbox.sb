@@ -1,0 +1,10 @@
+(version 1)
+(allow default)
+(deny network*)
+(deny file-write*)
+(allow file-write*
+  (subpath "/Users/bazinga/.dsh/bot/workspace/invest/invest-skill/.smoke-tmp")
+  (literal "/dev/null")
+  (literal "/dev/stdout")
+  (literal "/dev/stderr")
+)
