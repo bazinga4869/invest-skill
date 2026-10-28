@@ -10,10 +10,15 @@ reports/
 # Secrets & local state
 .env
 .venv/
+.venv-macos/
 .kimi-code/
+.claude/
 config/
 logs/
 company-analysis/
+config.yaml.bak-*
+investPM-temp
+.smoke-tmp/
 
 # Python
 __pycache__/
