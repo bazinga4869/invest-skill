@@ -119,8 +119,6 @@ validate_agent_backend() {
     case "$backend" in
         codex)
             local help_text preflight_output
-            local -a model_arg=()
-            [[ -n "$model" ]] && model_arg=(-m "$model")
             if ! help_text=$(codex exec --help 2>&1); then
                 echo "ERROR: 无法读取 codex exec 帮助，后端预检失败。" >&2
                 return 2
@@ -133,13 +131,24 @@ validate_agent_backend() {
                 fi
             done
             build_codex_isolation_args
-            if preflight_output=$(timeout 15 codex exec \
-                --strict-config --sandbox read-only --ephemeral --ignore-rules \
-                --skip-git-repo-check --output-schema /dev/null \
-                "${INVEST_CODEX_CONFIG_ARGS[@]}" "${model_arg[@]}" \
-                'invest-backend-preflight' </dev/null 2>&1); then
-                echo "ERROR: Codex 后端预检未按预期在模型调用前停止。" >&2
-                return 2
+            if [[ -n "$model" ]]; then
+                preflight_output=$(timeout 15 codex exec \
+                    --strict-config --sandbox read-only --ephemeral --ignore-rules \
+                    --skip-git-repo-check --output-schema /dev/null \
+                    "${INVEST_CODEX_CONFIG_ARGS[@]}" -m "$model" \
+                    'invest-backend-preflight' </dev/null 2>&1) && {
+                    echo "ERROR: Codex 后端预检未按预期在模型调用前停止。" >&2
+                    return 2
+                }
+            else
+                preflight_output=$(timeout 15 codex exec \
+                    --strict-config --sandbox read-only --ephemeral --ignore-rules \
+                    --skip-git-repo-check --output-schema /dev/null \
+                    "${INVEST_CODEX_CONFIG_ARGS[@]}" \
+                    'invest-backend-preflight' </dev/null 2>&1) && {
+                    echo "ERROR: Codex 后端预检未按预期在模型调用前停止。" >&2
+                    return 2
+                }
             fi
             if [[ "$preflight_output" != *"Output schema file /dev/null is not valid JSON"* ]]; then
                 echo "ERROR: 当前 Codex CLI 不支持所需的无工具隔离参数；未启动模型，也未消耗重试。" >&2
@@ -167,23 +176,31 @@ validate_agent_backend() {
 
 invoke_model_agent() {
     local backend="$1" output="$2" log="$3" timeout_seconds="$4" model="${5:-}"
-    local -a model_arg=()
-    local -a claude_model_arg=()
-    [[ -n "$model" ]] && model_arg=(-m "$model")
-    [[ -n "$model" ]] && claude_model_arg=(--model "$model")
     case "$backend" in
         codex)
             build_codex_isolation_args
             # --skip-git-repo-check 与预检一致：worker 目录（skill 仓库）不在
             # ~/.codex/config.toml 受信任列表，非交互 exec 会拒绝启动。
-            timeout "$timeout_seconds" codex exec \
-                -o "$output" --strict-config --sandbox read-only --ephemeral --ignore-rules \
-                --skip-git-repo-check \
-                "${INVEST_CODEX_CONFIG_ARGS[@]}" "${model_arg[@]}" - >"$log" 2>&1
+            if [[ -n "$model" ]]; then
+                timeout "$timeout_seconds" codex exec \
+                    -o "$output" --strict-config --sandbox read-only --ephemeral --ignore-rules \
+                    --skip-git-repo-check \
+                    "${INVEST_CODEX_CONFIG_ARGS[@]}" -m "$model" - >"$log" 2>&1
+            else
+                timeout "$timeout_seconds" codex exec \
+                    -o "$output" --strict-config --sandbox read-only --ephemeral --ignore-rules \
+                    --skip-git-repo-check \
+                    "${INVEST_CODEX_CONFIG_ARGS[@]}" - >"$log" 2>&1
+            fi
             ;;
         claude)
-            timeout "$timeout_seconds" claude --bare --no-session-persistence \
-                --tools "" "${claude_model_arg[@]}" -p >"$output" 2>"$log"
+            if [[ -n "$model" ]]; then
+                timeout "$timeout_seconds" claude --bare --no-session-persistence \
+                    --tools "" --model "$model" -p >"$output" 2>"$log"
+            else
+                timeout "$timeout_seconds" claude --bare --no-session-persistence \
+                    --tools "" -p >"$output" 2>"$log"
+            fi
             ;;
         *)
             echo "ERROR: 不支持的 agent 后端: $backend" >&2
@@ -195,9 +212,14 @@ invoke_model_agent() {
 record_agent_execution() {
     local script_dir="$1" code="$2" phase="$3" backend="$4" host="$5"
     local concurrency="$6" timeout_seconds="$7" repair_max_passes="${8:-}"
-    local -a repair_arg=()
-    [[ -n "$repair_max_passes" ]] && repair_arg=(--repair-max-passes "$repair_max_passes")
-    python3 "$script_dir/execution_provenance.py" "$code" "$phase" \
-        --backend "$backend" --host "$host" --model "${EXPERT_MODEL:-default}" \
-        --concurrency "$concurrency" --timeout "$timeout_seconds" "${repair_arg[@]}"
+    if [[ -n "$repair_max_passes" ]]; then
+        python3 "$script_dir/execution_provenance.py" "$code" "$phase" \
+            --backend "$backend" --host "$host" --model "${EXPERT_MODEL:-default}" \
+            --concurrency "$concurrency" --timeout "$timeout_seconds" \
+            --repair-max-passes "$repair_max_passes"
+    else
+        python3 "$script_dir/execution_provenance.py" "$code" "$phase" \
+            --backend "$backend" --host "$host" --model "${EXPERT_MODEL:-default}" \
+            --concurrency "$concurrency" --timeout "$timeout_seconds"
+    fi
 }

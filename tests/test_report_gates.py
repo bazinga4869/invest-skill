@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from scripts import collect_results as collect_results_module
 from scripts.assemble_report import (
-    WIKI_ROOT, _data_quality_notice, compute_score, evaluate_level3,
+    _data_quality_notice, compute_score, evaluate_level3,
     validate_adjudication, validate_devil_challenge,
 )
 from scripts.collect_challenges import validate_challenge
@@ -647,8 +647,12 @@ class ReportGateTests(unittest.TestCase):
             self.assertEqual(result["date_issues"], [])
 
     def test_adjudication_yaml_is_structurally_validated(self):
-        knowledge_hash = hashlib.sha256((WIKI_ROOT / "index.md").read_bytes()).hexdigest()
-        valid = f"""## 综合裁决 — 裁判长
+        with tempfile.TemporaryDirectory() as temp:
+            wiki_root = Path(temp)
+            index = wiki_root / "index.md"
+            index.write_text("test wiki context", encoding="utf-8")
+            knowledge_hash = hashlib.sha256(index.read_bytes()).hexdigest()
+            valid = f"""## 综合裁决 — 裁判长
 
 ```yaml
 ---
@@ -677,8 +681,13 @@ adjudicator:
 
 **加权评分计算过程**
 """
-        self.assertEqual(validate_adjudication(valid), [])
-        self.assertTrue(validate_adjudication(valid.replace("verdict: BUY", "verdict: MAYBE")))
+            with patch("scripts.assemble_report.WIKI_ROOT", wiki_root), patch(
+                "scripts.assemble_report.SAGE_WIKI_ROOT", wiki_root,
+            ):
+                self.assertEqual(validate_adjudication(valid), [])
+                self.assertTrue(
+                    validate_adjudication(valid.replace("verdict: BUY", "verdict: MAYBE"))
+                )
 
     def test_manifest_detects_tampering(self):
         with tempfile.TemporaryDirectory() as temp:

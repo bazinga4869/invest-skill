@@ -8,9 +8,10 @@ from scripts.cleanup_intermediates import cleanup_intermediates
 from scripts.prepare_challenges import VALID_CHALLENGE_VERDICTS
 from scripts.preserve_failure_evidence import preserve_failure_evidence
 from scripts.normalize_challenge import normalize_raw
+from scripts import collect_results as collect_results_module
 from scripts.collect_results import _is_table_ordinal, _wiki_path_exists
 from scripts.prepare_prompts import (
-    WIKI_ROOT, annual_locator_catalog, build_expert_prompt, checklist_template,
+    annual_locator_catalog, build_expert_prompt, checklist_template,
     narrative_quote_catalog, self_check_prompts,
 )
 from shared.expert_result_v3 import build_native_prompt, parse_result
@@ -233,6 +234,22 @@ challenge_prompt_hash: "__PROMPT_HASH__"
 
 class PromptContractTests(unittest.TestCase):
     def setUp(self):
+        self.wiki_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.wiki_tmp.cleanup)
+        self.wiki_root = Path(self.wiki_tmp.name) / "04_stock-analysis-expert"
+        (self.wiki_root / "experts").mkdir(parents=True)
+        (self.wiki_root / "adjudicator").mkdir(parents=True)
+        (self.wiki_root / "experts" / "01-财务排雷官.md").write_text(
+            "---\ntitle: 财务排雷官\n---\n分析方法 [[_schema]] [[_panel]]\n",
+            encoding="utf-8",
+        )
+        (self.wiki_root / "_schema.md").write_text("结果字段契约", encoding="utf-8")
+        (self.wiki_root / "experts" / "_panel.md").write_text(
+            "面板规则模板 {{F001}}", encoding="utf-8",
+        )
+        (self.wiki_root / "adjudicator" / "裁判长-多框架裁判规则.md").write_text(
+            "---\ntitle: 裁判长-多框架裁判规则\n---\n裁判规则", encoding="utf-8",
+        )
         self.annual = """
 ### 2025年 annual（公告日：20260401，标题：2025年报）
 #### 经营情况讨论与分析
@@ -287,7 +304,7 @@ class PromptContractTests(unittest.TestCase):
         prompt = build_expert_prompt(
             "financial-auditor", "01-财务排雷官", CODE, "测试",
             json.dumps(self.data, ensure_ascii=False), self.annual,
-            "20260731", "20260801", BATCH, WIKI_ROOT,
+            "20260731", "20260801", BATCH, self.wiki_root,
         )
         self.assertIn(
             "04_stock-analysis-expert/experts/01-财务排雷官.md", prompt,
@@ -306,7 +323,7 @@ class PromptContractTests(unittest.TestCase):
         prompt = build_expert_prompt(
             "financial-auditor", "01-财务排雷官", CODE, "测试",
             json.dumps(self.data, ensure_ascii=False), self.annual,
-            "20260731", "20260801", BATCH, WIKI_ROOT,
+            "20260731", "20260801", BATCH, self.wiki_root,
             sage_context=sage,
         )
         self.assertIn(sage, prompt)
@@ -319,7 +336,7 @@ class PromptContractTests(unittest.TestCase):
         prompt = build_expert_prompt(
             "financial-auditor", "01-财务排雷官", CODE, "测试",
             json.dumps(self.data, ensure_ascii=False), self.annual,
-            "20260731", "20260801", BATCH, WIKI_ROOT,
+            "20260731", "20260801", BATCH, self.wiki_root,
         )
         self.assertIn("面板与方法论契约", prompt)
         self.assertIn("04_stock-analysis-expert/_schema.md", prompt)
@@ -330,7 +347,7 @@ class PromptContractTests(unittest.TestCase):
         prompt = build_expert_prompt(
             "financial-auditor", "01-财务排雷官", CODE, "测试",
             json.dumps(self.data, ensure_ascii=False), self.annual,
-            "20260731", "20260801", BATCH, WIKI_ROOT,
+            "20260731", "20260801", BATCH, self.wiki_root,
             sage_context="（示例：staged JSON 正文用 {{F001}} 占位）",
             injected_out=injected,
         )
@@ -343,9 +360,14 @@ class PromptContractTests(unittest.TestCase):
 
     def test_validator_accepts_legacy_chinese_ordinals_and_unique_wikilink(self):
         self.assertTrue(_is_table_ordinal("三"))
-        # 迁移说明：原夹具指向旧 invest-sage 页面；现知识层为投资知识库 AI-Wiki，
-        # 改用面板内真实存在且唯一的页面，保持“唯一 wikilink 可解析”这一契约不变。
-        self.assertTrue(_wiki_path_exists("[[裁判长-多框架裁判规则]]"))
+        with (
+            patch.object(collect_results_module, "WIKI_REPO", self.wiki_root.parent),
+            patch.object(collect_results_module, "WIKI_ROOT", self.wiki_root),
+            patch.object(collect_results_module, "LEGACY_WIKI_REPO", self.wiki_root.parent),
+        ):
+            _wiki_path_exists.cache_clear()
+            self.assertTrue(_wiki_path_exists("[[裁判长-多框架裁判规则]]"))
+            _wiki_path_exists.cache_clear()
 
 
 class CognitiveMultiplierPromptTests(unittest.TestCase):
