@@ -40,7 +40,7 @@ JSON_PATH_PATTERN = re.compile(r'[A-Za-z_][\w-]*(?:\[\d+\])?(?:\.[A-Za-z_][\w-]*
 
 META_SECTIONS = {
     '结构化自评审', '必检项执行记录', '知识检索日志', '质询问题',
-    '第三级触发评估',
+    '第三级触发评估', '数据质量与待补齐',
 }
 META_LINE_PATTERN = re.compile(
     r'^\s*(?:score|data_date|analysis_date|batch_id|expert_id|ts_code|verdict|'

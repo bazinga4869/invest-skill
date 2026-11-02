@@ -743,6 +743,22 @@ def archive_run(ts_code: str, draft_file: Path,
     return run_id, manifest_path
 
 
+def _data_quality_notice(quality: dict) -> str:
+    if quality.get("status") != "WARN":
+        return ""
+    warnings = quality.get("warnings", [])
+    warnings = [item for item in warnings if isinstance(item, str) and item.strip()]
+    if not warnings:
+        return ""
+    return (
+        "\n\n## 数据质量与待补齐\n\n"
+        "**当前为降级数据快照（WARN）。** 未公告日期的数据行已排除，缺失值不代表零；"
+        "以下缺口需补齐后重新分析：\n\n"
+        + "\n".join(f"- {warning}" for warning in warnings)
+        + "\n"
+    )
+
+
 def build_report(ts_code: str, name: str, results: dict, data: dict,
                  scoring: dict, challenges: dict, level3: dict,
                  cross_text: str = "", degraded: bool = False) -> str:
@@ -863,6 +879,7 @@ def build_report(ts_code: str, name: str, results: dict, data: dict,
                 "> 本批次有效同行样本不足 5 家，行业中位/排名不展示，行业结论降级。\n"
             )
 
+    overview += _data_quality_notice(data.get("data_quality", {}))
     overview += """\n\n**一行总评**：待裁判长填写。\n\n---\n"""
 
     # 嵌入专家原文

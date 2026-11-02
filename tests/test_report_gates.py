@@ -11,8 +11,8 @@ from unittest.mock import patch
 
 from scripts import collect_results as collect_results_module
 from scripts.assemble_report import (
-    WIKI_ROOT, compute_score, evaluate_level3, validate_adjudication,
-    validate_devil_challenge,
+    WIKI_ROOT, _data_quality_notice, compute_score, evaluate_level3,
+    validate_adjudication, validate_devil_challenge,
 )
 from scripts.collect_challenges import validate_challenge
 from scripts.collect_cross_reviews import (
@@ -528,6 +528,23 @@ class ReportGateTests(unittest.TestCase):
         )
         self.assertTrue(findings)
         self.assertTrue(all(item["category"] == "meta" for item in findings))
+
+    def test_warn_data_quality_is_visible_as_degraded_and_requires_supplement(self):
+        notice = _data_quality_notice({
+            "status": "WARN",
+            "warnings": [
+                "公告日期缺失的财务行已从 as-of 快照排除（income=12）；需补齐公告日期后重建分析",
+                "audit 缺少最新年报审计意见；当前分析降级，需补齐审计意见",
+            ],
+        })
+        self.assertIn("数据质量与待补齐", notice)
+        self.assertIn("降级数据快照（WARN）", notice)
+        self.assertIn("不代表零", notice)
+        self.assertIn("补齐审计意见", notice)
+        findings = extract_numbers(notice)
+        self.assertTrue(findings)
+        self.assertTrue(all(item["category"] == "meta" for item in findings))
+        self.assertEqual(_data_quality_notice({"status": "PASS", "warnings": []}), "")
 
     def test_cognitive_multiplier_frontmatter_is_metadata(self):
         findings = extract_numbers("---\ncognitive_multiplier: 0.85\n---")
