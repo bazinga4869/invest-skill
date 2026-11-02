@@ -17,8 +17,11 @@ from shared.data_tools import (
     _standalone_quarters,
     _sum_nullable,
     _ttm,
+    _undated_financial_counts,
     _yi,
+    cmd_forecast,
     cmd_market,
+    cmd_sync,
     validate_snapshot,
 )
 
@@ -113,6 +116,94 @@ class DataContractTests(unittest.TestCase):
         self.assertIsNone(yuan_to_wan(float("nan")))
         self.assertIsNone(yuan_to_wan(float("inf")))
 
+    def test_undated_financial_rows_are_counted_without_inventing_dates(self):
+        conn = sqlite3.connect(":memory:")
+        for table in ("income", "balance", "cashflow"):
+            conn.execute(
+                f"CREATE TABLE {table} (ts_code TEXT, end_date TEXT, ann_date TEXT, f_ann_date TEXT)"
+            )
+        conn.execute(
+            "CREATE TABLE fina_indicators (ts_code TEXT, end_date TEXT, ann_date TEXT)"
+        )
+        conn.execute("INSERT INTO income VALUES (?,?,?,?)", ("000001.SZ", "20251231", "", ""))
+        conn.execute("INSERT INTO income VALUES (?,?,?,?)", ("000001.SZ", "20241231", "", "20250330"))
+        conn.execute("INSERT INTO balance VALUES (?,?,?,?)", ("000001.SZ", "20251231", None, ""))
+        conn.execute("INSERT INTO cashflow VALUES (?,?,?,?)", ("000001.SZ", "20251231", "20260330", ""))
+        conn.execute("INSERT INTO fina_indicators VALUES (?,?,?)", ("000001.SZ", "20251231", ""))
+        with patch("shared.data_tools.get_db", return_value=conn):
+            counts = _undated_financial_counts("000001.SZ")
+        self.assertEqual(counts, {"income": 1, "balance": 1, "fina_indicators": 1})
+
+    def test_forecast_query_excludes_blank_announcement_dates(self):
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE forecast (ts_code TEXT, ann_date TEXT, end_date TEXT, type TEXT, "
+            "net_profit_min REAL, net_profit_max REAL, last_parent_net REAL, "
+            "p_change_min REAL, p_change_max REAL, summary TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO forecast VALUES (?,?,?,?,?,?,?,?,?,?)",
+            [
+                ("000001.SZ", "", "20251231", "预增", 1, 2, 1, 10, 20, "undated"),
+                ("000001.SZ", "20260701", "20260630", "预增", 3, 4, 2, 20, 30, "dated"),
+            ],
+        )
+        with patch("shared.data_tools.get_db", return_value=conn), patch(
+            "shared.data_tools.TODAY", datetime(2026, 7, 30),
+        ):
+            result = cmd_forecast("000001.SZ")
+        self.assertEqual(len(result["forecasts"]), 1)
+        self.assertEqual(result["forecasts"][0]["summary"], "dated")
+
+    def test_sync_degrades_when_audit_table_is_unavailable(self):
+        class FakeSource:
+            name = "akshare"
+
+            @staticmethod
+            def get_daily_quotes(*_args):
+                return pd.DataFrame()
+
+            @staticmethod
+            def get_daily_basic(*_args):
+                return pd.DataFrame()
+
+            @staticmethod
+            def _financial(*_args):
+                return pd.DataFrame([{
+                    "ts_code": "000001.SZ", "end_date": "20251231",
+                    "ann_date": "", "f_ann_date": "",
+                }])
+
+            get_income = _financial
+            get_balance = _financial
+            get_cashflow = _financial
+            get_fina_indicator = _financial
+
+            @staticmethod
+            def get_fina_audit(*_args):
+                return pd.DataFrame()
+
+            @staticmethod
+            def get_forecast(*_args):
+                return pd.DataFrame()
+
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE daily_basic (ts_code TEXT, trade_date TEXT)")
+        conn.execute("CREATE TABLE income (ts_code TEXT, end_date TEXT)")
+        with (
+            patch("shared.data_tools.get_db", return_value=conn),
+            patch("shared.data_tools.create_data_source", return_value=FakeSource()),
+            patch("shared.data_tools._write_daily", return_value=0),
+            patch("shared.data_tools._write_fin", side_effect=lambda _c, frame, *_a, **_k: len(frame)),
+            patch("shared.data_tools.time.sleep"),
+            patch("shared.data_tools.TODAY", datetime(2026, 7, 30)),
+        ):
+            result = cmd_sync("000001.SZ", force=True)
+        self.assertIn("financials", result["synced"])
+        self.assertIn("fina_audit:unavailable", result["skipped"])
+        self.assertTrue(any("audit" in warning for warning in result["warnings"]))
+        self.assertTrue(any("缺公告日期" in warning for warning in result["warnings"]))
+
     def test_json_output_is_strict_and_nonfinite_becomes_null(self):
         text = _json_dumps({"a": float("nan"), "b": np.float64("inf")})
         self.assertEqual(json.loads(text), {"a": None, "b": None})
@@ -179,6 +270,33 @@ class DataContractTests(unittest.TestCase):
         self.assertTrue(any("goodwill" in message for message in quality["warnings"]))
         self.assertTrue(any("资本开支" in message for message in quality["warnings"]))
         self.assertTrue(any("cash_yi" in message for message in quality["warnings"]))
+
+        degraded = json.loads(json.dumps(data))
+        degraded.setdefault("meta", {})["undated_financial_rows"] = {
+            "income": 6, "cashflow": 6, "balance": 3, "fina_indicators": 3,
+        }
+        degraded["annual"] = {
+            "ts_code": "000001.SZ", "count": 0, "annual_data": [],
+        }
+        degraded["quarterly"] = {
+            "ts_code": "000001.SZ", "periods": [],
+            "ocf_ttm_complete": False, "ttm_complete": False,
+        }
+        degraded["balance"] = {
+            "ts_code": "000001.SZ", "end_date": None,
+            "total_assets_yi": None, "equity_yi": None,
+        }
+        degraded["indicators"] = {
+            "ts_code": "000001.SZ", "count": 0, "indicators": [],
+        }
+        degraded["audit"] = {"ts_code": "000001.SZ", "has_audit": False}
+        degraded_quality = validate_snapshot(
+            degraded, reference_date=datetime(2026, 7, 30),
+        )
+        self.assertEqual(degraded_quality["status"], "WARN")
+        self.assertEqual(degraded_quality["errors"], [])
+        self.assertTrue(any("公告日期缺失" in message for message in degraded_quality["warnings"]))
+        self.assertTrue(any("补齐审计意见" in message for message in degraded_quality["warnings"]))
 
     def test_market_query_respects_historical_asof(self):
         conn = sqlite3.connect(":memory:")

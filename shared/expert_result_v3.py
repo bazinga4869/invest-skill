@@ -27,6 +27,7 @@ from scripts.verify_report import (
 SCHEMA_VERSION = "expert-result/v3"
 VALID_VERDICTS = {"PASS", "WARN", "VETO"}
 VALID_DIRECTIONS = {"POSITIVE", "NEUTRAL", "NEGATIVE"}
+COGNITIVE_MULTIPLIERS = (1.0, 0.92, 0.85, 0.70)
 RESULT_MAX_BYTES = 96 * 1024
 
 EXPERT_ALLOWED_PREFIXES = {
@@ -346,6 +347,16 @@ def validate_result(result: dict, *, expert_id: str, ts_code: str, data: dict,
         raise ExpertResultV3Error("VETO 必须提供 veto_triggers")
     if verdict != "VETO" and veto:
         raise ExpertResultV3Error("非 VETO 不得提供 veto_triggers")
+    if expert_id == "cognitive-controller":
+        multiplier = decision.get("cognitive_multiplier")
+        if (isinstance(multiplier, bool) or not isinstance(multiplier, (int, float))
+                or not math.isfinite(float(multiplier))
+                or float(multiplier) not in COGNITIVE_MULTIPLIERS):
+            raise ExpertResultV3Error(
+                "cognitive-controller decision.cognitive_multiplier 必须是 1.00/0.92/0.85/0.70"
+            )
+    elif "cognitive_multiplier" in decision:
+        raise ExpertResultV3Error("cognitive_multiplier 仅适用于 cognitive-controller")
 
     facts_by_id, _ = fact_maps(data, expert_id)
     valid_fact_ids = set(facts_by_id)
@@ -519,6 +530,13 @@ def build_native_prompt(*, expert_id: str, ts_code: str, data: dict,
         "checklist_conclusions": {item: "逐项实质结论、缺口及影响" for item in checklist_items},
         "data_usage": "数据范围、缺失项和结论降级说明",
     }
+    cognitive_instruction = ""
+    if expert_id == "cognitive-controller":
+        skeleton["decision"]["cognitive_multiplier"] = 0.85
+        cognitive_instruction = (
+            "认知风控官还必须提供 decision.cognitive_multiplier，且只能取 1.00、0.92、"
+            "0.85、0.70；分别对应无实质偏误、轻微偏误、需降权的偏误、系统性认知陷阱。"
+        )
     return f"""⬛⬛⬛ ExpertResult v3 唯一输出契约 ⬛⬛⬛
 你是当前主 agent 创建的独立 {expert_id} 子代理。只输出一个 JSON object；不要 Markdown
 代码围栏、前言或结尾确认。不要启动任何外部 CLI，不使用网络或其他项目文件。
@@ -541,6 +559,7 @@ veto_triggers）禁止直接输入阿拉伯数字，也禁止手写 [source:] / 
   CONTRADICTED 或 UNKNOWN；合计至少五个 fact_ids、三个不同事实；
 - checklist_conclusions 必须包含下方全部项目且键名逐字一致；
 - VETO 时 veto_triggers 非空并明确原因；非 VETO 时必须为空；
+{cognitive_instruction}
 - 结论必须诚实处理数据缺失，不得编造同行、行业或外部事实；没有合格行业样本时避免
   “行业平均/普遍/通常”等措辞；不要写“历史最高/最低”或“连续若干年”等历史断言，
   改为逐期事实 token 的客观比较。
@@ -611,6 +630,8 @@ def render_markdown(result: dict, *, expert_id: str, ts_code: str, data: dict,
         "## 详细分析",
         "",
     ]
+    if expert_id == "cognitive-controller":
+        lines.insert(9, f'cognitive_multiplier: {decision["cognitive_multiplier"]:.2f}')
     for item in result["analysis_sections"]:
         lines.extend([
             f"### {_expand(item['heading'], facts, source_map)}", "",

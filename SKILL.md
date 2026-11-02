@@ -83,10 +83,11 @@ prompt 不超体积上限；自检失败（exit 2）视为准备阶段失败，�
 哈希和本地 FTS5/BM25 索引。Sage/LLM 摘要不是年报 evidence 的硬依赖；
 `--force-sync` 只检查新披露/更正版，不无条件重编译未变化原件。
 
-若 `data_quality.status=FAIL`、report-wiki 未实现或其 bundle 未通过完整年度、
-公告日、逐页来源、原件/章节/索引哈希、最新应有年报缺失、方法论 Sage live/cache
-契约缺失或 prompt bundle 哈希不一致，立即停止。Sage 查询失败时仅允许使用按专家
-主题独立保存且内容哈希通过校验的缓存；无合格缓存仍 fail-closed。
+`data_quality.status=WARN` 表示显式降级：报告必须保留全部质量警告并标明待补齐项；不得把缺失值当零，
+也不得把没有可验证公告日期的财务行用于截至日分析。若 `data_quality.status=FAIL`、report-wiki
+未实现或其 bundle 未通过完整年度、公告日、逐页来源、原件/章节/索引哈希、最新应有年报缺失、
+方法论 Sage live/cache 契约缺失或 prompt bundle 哈希不一致，立即停止。Sage 查询失败时仅允许
+使用按专家主题独立保存且内容哈希通过校验的缓存；无合格缓存仍 fail-closed。
 处理取数和口径问题时读取 [数据契约](references/data-contract.md)。
 
 ### 三、并行执行七位专家
@@ -125,7 +126,7 @@ python3 scripts/native_agent_tasks.py begin experts <code> --retry
 ```
 
 该事务仍使用当前主 agent 的原生子代理且不覆盖 provider/model。唯一重试事务内最多
-3 轮「修复→单专家校验」，每轮只注入冻结的官方原始任务书、该专家最新失败结果与完整 diagnostics（含未溯源数字、缺失路径、覆盖率），模型按诊断定向修复，不重跑已通过专家。首次独立输出的 decision（即使因格式未发布）会单独冻结并在每个 repair prompt 中明示；trace/格式修复必须保持 score、verdict、conclusion_direction 和 veto，任何漂移都会硬失败。若事实变化足以改变判断，应重建批次而不是借 repair 偷换结论。
+3 轮「修复→单专家校验」，每轮只注入冻结的官方原始任务书、该专家最新失败结果与完整 diagnostics（含未溯源数字、缺失路径、覆盖率），模型按诊断定向修复，不重跑已通过专家。首次独立输出的 decision（即使因格式未发布）会单独冻结并在每个 repair prompt 中明示；trace/格式修复必须保持 score、verdict、conclusion_direction、veto 及已提供的 cognitive_multiplier，任何漂移都会硬失败。认知专家首次输出缺少/非法 multiplier 时允许修复补上有效值，但不得改变其余 decision 字段。若事实变化足以改变判断，应重建批次而不是借 repair 偷换结论。
 
 只要发生 retry，所有 plan、官方任务书、repair prompt、diagnostics、rejected raw/hash、child id 与每轮执行事件都必须进入 retry evidence ledger；缺一项禁止发布。
 

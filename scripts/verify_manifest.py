@@ -49,7 +49,7 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def verify(report_path: str) -> dict:
+def verify(report_path: str, *, require_publication: bool = True) -> dict:
     report = Path(report_path).resolve()
     if not report.is_file():
         return {"status": "FAIL", "errors": [f"正式报告不存在: {report}"]}
@@ -116,7 +116,7 @@ def verify(report_path: str) -> dict:
                 errors.append("正式报告与归档副本不一致")
     if not seen_report:
         errors.append("manifest 未包含正式报告副本")
-    if contract_version == CONTRACT_VERSION:
+    if contract_version == CONTRACT_VERSION and require_publication:
         publish_marker = manifest_path.parent / ".published.json"
         try:
             publication = json.loads(publish_marker.read_text(encoding="utf-8"))

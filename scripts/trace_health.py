@@ -110,7 +110,8 @@ def analyze(events: list) -> dict:
     }
 
 
-def print_health(stats: dict, show_failing_only: bool = False):
+def print_health(stats: dict, show_failing_only: bool = False,
+                 events: list | None = None):
     if "error" in stats:
         print(stats["error"])
         return
@@ -156,24 +157,16 @@ def print_health(stats: dict, show_failing_only: bool = False):
     print(f"\n{'='*60}")
     print("  最近异常事件（最多 5 条）：")
     found = 0
-    for f in sorted(TRACE_DIR.glob("*.jsonl"), reverse=True):
+    filtered_events = events if events is not None else load_traces()
+    for ev in reversed(filtered_events):
         if found >= 5:
             break
-        for line in f.read_text(encoding="utf-8").strip().split("\n"):
-            if found >= 5:
-                break
-            if not line.strip():
-                continue
-            try:
-                ev = json.loads(line)
-                if ev.get("status") in ("error", "timeout", "crash"):
-                    phase = ev.get("phase", "?")
-                    code = ev.get("code", "?")
-                    msg = ev.get("msg", ev.get("stderr_tail", ev.get("error", "")))[:80]
-                    print(f"  ⚠ {code} [{phase}] {msg}")
-                    found += 1
-            except Exception:
-                pass
+        if ev.get("status") in ("error", "timeout", "crash"):
+            phase = ev.get("phase", "?")
+            code = ev.get("code", "?")
+            msg = ev.get("msg", ev.get("stderr_tail", ev.get("error", "")))[:80]
+            print(f"  ⚠ {code} [{phase}] {msg}")
+            found += 1
     if found == 0:
         print("  （无异常）")
     print(f"{'='*60}\n")
@@ -188,7 +181,7 @@ def main():
 
     events = load_traces(days=args.days, code=args.code)
     stats = analyze(events)
-    print_health(stats, show_failing_only=args.failing)
+    print_health(stats, show_failing_only=args.failing, events=events)
 
 
 if __name__ == "__main__":

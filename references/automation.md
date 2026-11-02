@@ -8,14 +8,17 @@
   （本机为 invest-harness）负责：`~/invest-harness/scripts/cron/cron_*.sh` wrapper
   注入环境（source `~/.config/invest-skill.env` + 兜底 `INVEST_SKILL_HOME`）后调用
   本仓库执行器。排查定时问题时先看宿主 crontab 与 wrapper 日志。
-- **运行时根**：DB、日志、报告、`auto_state.json` 等持久产物写入调用方 `INVEST_SKILL_HOME`
-  指定的目录（本机：`~/invest-harness/.invest-skill-runtime/`），不回写 skill 仓库。
-  `cron_trigger.sh` / `daily_analysis.sh` 会 source `~/.config/invest-skill.env`
-  获取 `INVEST_SKILL_HOME`；手动运行前请先 `export INVEST_SKILL_HOME=...`，
-  或依赖 `config.yaml paths.runtime_root`（绝对路径）。
-- **运行时根防护**：入口脚本（cron_trigger/daily_analysis/native_agent_tasks/
-  prepare_prompts）在 `INVEST_SKILL_HOME` 未设置时 **exit 2 拒绝运行**
-  （除非 `INVEST_ALLOW_SKILL_RUNTIME=1` 显式逃逸），防止运行时产物写回 skill 仓库。
+- **持久化根**：数据库和报告等由 `shared.project_config.runtime_root()` 解析，优先级为
+  `INVEST_SKILL_HOME` > `config.yaml paths.runtime_root` > skill 仓库兼容回退；生产配置应
+  将根放在仓库外。`cron_trigger.sh` / `daily_analysis.sh` 会 source
+  `~/.config/invest-skill.env` 获取宿主配置。
+- **临时运行根**：prompt、staging、锁和阶段结果使用 `shared.runtime.RUNTIME_ROOT`，
+  优先级为 `INVEST_RUNTIME_DIR` > `INVEST_SKILL_HOME` > `/tmp` 兼容回退。配置文件中的
+  `paths.runtime_root` 不会自动成为该临时根；生产 wrapper 应显式设置私有运行目录，避免
+  临时产物落到系统 `/tmp`。
+- **运行时根防护**：`prepare_prompts.py` 仅在持久化根解析为 skill 仓库且未设置
+  `INVEST_ALLOW_SKILL_RUNTIME=1` 时拒绝运行。不能据此推断所有其他入口都会拒绝缺少
+  `INVEST_SKILL_HOME`；它们仍按各自的持久根/临时根解析器运行。
 - **失败告警**：`scripts/alert.sh` 写 `logs/alert.jsonl` 并推送 Telegram/Discord（hermes send，
   无 LLM）；`cron_trigger.sh` 所有失败分支接入；`scripts/watchdog.sh` 工作日 08:00 健康检查
   （最近 30h 无成功报告且无告警记录时推送，幂等）。

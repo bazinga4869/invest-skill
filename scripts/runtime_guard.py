@@ -18,7 +18,7 @@ from shared.runtime import RUNTIME_ROOT
 
 TMP_ROOT = RUNTIME_ROOT
 VALID_OWNERS = {
-    "prepare", "native", "shell", "challenges", "cross-reviews", "finalize",
+    "prepare", "native", "shell", "challenges", "cross-reviews", "finalize", "cleanup",
 }
 VALID_PHASES = {"experts", "challenges", "cross-reviews"}
 
@@ -109,7 +109,7 @@ def _atomic_replace(path: Path, payload: dict) -> None:
 def claim_run(ts_code: str, owner: str, tmp_root: Path = TMP_ROOT) -> dict:
     if owner not in VALID_OWNERS:
         raise GuardError(f"owner 只支持: {sorted(VALID_OWNERS)}")
-    batch_id = "PENDING" if owner == "prepare" else current_batch_id(ts_code, tmp_root)
+    batch_id = "PENDING" if owner in {"prepare", "cleanup"} else current_batch_id(ts_code, tmp_root)
     existing = read_run_state(ts_code, tmp_root)
     if existing:
         raise GuardError(

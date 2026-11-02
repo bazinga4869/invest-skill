@@ -17,6 +17,7 @@ from shared.contracts import normalize_ts_code
 from shared.project_config import configured_path
 from shared.runtime import RUNTIME_ROOT
 from shared.project_config import runtime_root
+from scripts.runtime_guard import GuardError, claim_run, release_run
 
 
 def runtime_paths(ts_code: str, tmp_root: Path = RUNTIME_ROOT) -> set[Path]:
@@ -28,7 +29,6 @@ def runtime_paths(ts_code: str, tmp_root: Path = RUNTIME_ROOT) -> set[Path]:
         f"invest_results_{ts_code}.json",
         f"invest_level3_{ts_code}.json",
         f"invest_cross_blind_{ts_code}.md",
-        f"invest_expert_run_{ts_code}.json",
         f"invest_execution_{ts_code}.json",
         f"invest_adjudication_{ts_code}.json",
         f"invest_retry_evidence_{ts_code}.json",
@@ -76,20 +76,15 @@ def log_paths(ts_code: str, log_root: Path) -> set[Path]:
     return paths
 
 
-def cleanup_intermediates(
-    ts_code: str,
+def _cleanup_files(
+    code: str,
     *,
-    tmp_root: Path = RUNTIME_ROOT,
-    log_root: Path | None = None,
-    reports_dir: Path | None = None,
-    remove_logs: bool = True,
-    remove_draft: bool = True,
+    tmp_root: Path,
+    log_root: Path,
+    reports_dir: Path,
+    remove_logs: bool,
+    remove_draft: bool,
 ) -> dict:
-    code = normalize_ts_code(ts_code)
-    log_root = log_root or Path(os.environ.get("INVEST_LOG_DIR", runtime_root() / "logs"))
-    reports_dir = reports_dir or Path(os.environ.get(
-        "INVEST_REPORTS_DIR", configured_path("invest_tool_dir", "./reports/invest_tool")
-    ))
     candidates = runtime_paths(code, tmp_root)
     if remove_logs:
         candidates.update(log_paths(code, log_root))
@@ -148,6 +143,59 @@ def cleanup_intermediates(
             finally:
                 staged.unlink(missing_ok=True)
     return result
+
+
+def cleanup_intermediates(
+    ts_code: str,
+    *,
+    tmp_root: Path = RUNTIME_ROOT,
+    log_root: Path | None = None,
+    reports_dir: Path | None = None,
+    remove_logs: bool = True,
+    remove_draft: bool = True,
+    active_finalize_token: str | None = None,
+) -> dict:
+    code = normalize_ts_code(ts_code)
+    log_root = log_root or Path(os.environ.get("INVEST_LOG_DIR", runtime_root() / "logs"))
+    reports_dir = reports_dir or Path(os.environ.get(
+        "INVEST_REPORTS_DIR", configured_path("invest_tool_dir", "./reports/invest_tool")
+    ))
+    run_state_path = tmp_root / f"invest_expert_run_{code}.json"
+    lease = None
+    if active_finalize_token is None:
+        try:
+            lease = claim_run(code, "cleanup", tmp_root)
+        except GuardError as exc:
+            return {
+                "ts_code": code, "removed": [],
+                "errors": [f"清理被活动管线互斥锁拒绝: {exc}"],
+                "remaining": [str(run_state_path)] if run_state_path.exists() else [],
+            }
+    else:
+        try:
+            state = json.loads(run_state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return {
+                "ts_code": code, "removed": [],
+                "errors": [f"无法验证定稿阶段清理租约: {exc}"],
+                "remaining": [str(run_state_path)],
+            }
+        if (not isinstance(state, dict) or state.get("owner") != "finalize"
+                or state.get("token") != active_finalize_token):
+            return {
+                "ts_code": code, "removed": [],
+                "errors": ["定稿阶段清理租约 owner/token 不匹配"],
+                "remaining": [str(run_state_path)],
+            }
+    try:
+        return _cleanup_files(
+            code, tmp_root=tmp_root, log_root=log_root, reports_dir=reports_dir,
+            remove_logs=remove_logs, remove_draft=remove_draft,
+        )
+    finally:
+        if lease is not None:
+            release_run(code, "cleanup", tmp_root, token=lease["token"])
+
 
 
 def main() -> int:

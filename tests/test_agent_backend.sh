@@ -52,6 +52,19 @@ capture=$(<"$capture_log")
     exit 1
 }
 
+# Optional model arguments must remain safe under macOS Bash 3.2 + nounset.
+: >"$capture_log"
+{
+    source "$HELPER"
+    timeout() { printf '%q ' "$@"; cat >/dev/null; }
+    invoke_model_agent codex /tmp/out "$capture_log" 30 <<<prompt
+}
+capture=$(<"$capture_log")
+[[ "$capture" != *" -m "* ]] || {
+    echo "未指定模型时不应生成 Codex model flag: $capture" >&2
+    exit 1
+}
+
 preflight_capture=$(mktemp)
 trap 'rm -f -- "$capture_log" "$preflight_capture"' EXIT
 {
@@ -67,6 +80,7 @@ trap 'rm -f -- "$capture_log" "$preflight_capture"' EXIT
         fi
     }
     validate_agent_backend codex model-y
+    validate_agent_backend codex
 }
 preflight=$(<"$preflight_capture")
 [[ "$preflight" == *"--output-schema /dev/null"* \
@@ -84,6 +98,20 @@ preflight=$(<"$preflight_capture")
 capture=$(<"$capture_log")
 [[ "$capture" == *"--tools ''"* && "$capture" == *"--no-session-persistence"* ]] || {
     echo "Claude worker 未保持无工具策略: $capture" >&2
+    exit 1
+}
+
+record_capture=$(mktemp)
+trap 'rm -f -- "$capture_log" "$preflight_capture" "$record_capture"' EXIT
+{
+    source "$HELPER"
+    python3() { printf '%q ' "$@" >>"$record_capture"; }
+    record_agent_execution "$SKILL_ROOT/scripts" 000001.SZ experts codex codex 2 60
+}
+record_args=$(<"$record_capture")
+[[ "$record_args" == *"execution_provenance.py"* \
+   && "$record_args" != *"--repair-max-passes"* ]] || {
+    echo "未提供 repair 轮数时执行元数据参数异常: $record_args" >&2
     exit 1
 }
 

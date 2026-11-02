@@ -48,7 +48,7 @@ class NativeAgentTaskTests(unittest.TestCase):
             patch.object(native, "_run", side_effect=fake_run),
             patch.object(native, "claim_run", return_value={"token": "token1"}),
             patch.object(native, "_prepare_phase", return_value=[self.expert]),
-            patch.object(native, "current_batch_id", return_value="batch1"),
+            patch.object(native, "current_batch_id", return_value="a" * 24),
             patch.object(native, "record_execution"),
             patch.object(native, "release_run"),
         ]
@@ -81,6 +81,40 @@ class NativeAgentTaskTests(unittest.TestCase):
         with self.assertRaises(native.NativeTaskError) as ctx:
             native.begin(CODE, "experts", False)
         self.assertIn("控制面已变化", str(ctx.exception))
+
+    def test_failed_competing_begin_does_not_delete_winner_plan(self):
+        winner = native._plan_path(CODE)
+
+        def competing_claim(*_args, **_kwargs):
+            winner.write_text('{"winner":true}', encoding="utf-8")
+            raise native.GuardError("another process owns the run lease")
+
+        with patch.object(native, "claim_run", side_effect=competing_claim):
+            with self.assertRaises(native.GuardError):
+                native.begin(CODE, "experts", False)
+        self.assertEqual(json.loads(winner.read_text(encoding="utf-8")), {"winner": True})
+
+    def test_commit_rejects_tampered_result_destination(self):
+        plan = native.begin(CODE, "experts", False)
+        staged = Path(plan["jobs"][0]["staged_output_path"])
+        staged.write_text('{"schema_version":"expert-result/v3"}', encoding="utf-8")
+        victim = self.root.parent / f"{self.root.name}-victim.txt"
+        victim.write_text("preserve", encoding="utf-8")
+        saved = json.loads(native._plan_path(CODE).read_text(encoding="utf-8"))
+        saved["jobs"][0]["result_path"] = str(victim)
+        native._plan_path(CODE).write_text(json.dumps(saved), encoding="utf-8")
+
+        with self.assertRaises(native.NativeTaskError):
+            native.commit(CODE, "experts", self.expert, "child-test-0001")
+        self.assertEqual(victim.read_text(encoding="utf-8"), "preserve")
+
+    def test_native_archive_rejects_traversal_plan_components(self):
+        plan = {
+            "ts_code": CODE, "phase": "cross-reviews", "batch_id": "a" * 24,
+            "transaction_id": "../../../outside/escape",
+        }
+        with self.assertRaises(native.NativeTaskError):
+            native._evidence_dir(plan)
 
     def test_unresolved_placeholder_fails_before_delegation(self):
         (self.root / f"invest_native_prompt_{CODE}_{self.expert}.txt").write_text(
@@ -218,12 +252,28 @@ class NativeAgentTaskTests(unittest.TestCase):
             "score": 62, "verdict": "WARN",
             "conclusion_direction": "NEUTRAL", "veto_triggers": []
         }}), encoding="utf-8")
-        self.assertEqual(native._decision_signature(path), (62, "WARN", "NEUTRAL", ()))
         path.write_text(json.dumps({"decision": {
-            "score": 61, "verdict": "WARN",
-            "conclusion_direction": "NEUTRAL", "veto_triggers": []
+            "score": 62, "verdict": "WARN",
+            "conclusion_direction": "NEUTRAL", "veto_triggers": [],
+            "cognitive_multiplier": 0.85,
         }}), encoding="utf-8")
-        self.assertNotEqual(native._decision_signature(path), (62, "WARN", "NEUTRAL", ()))
+        self.assertEqual(
+            native._decision_signature(path),
+            (62, "WARN", "NEUTRAL", (), 0.85),
+        )
+        path.write_text(json.dumps({"decision": {
+            "score": 62, "verdict": "WARN",
+            "conclusion_direction": "NEUTRAL", "veto_triggers": [],
+            "cognitive_multiplier": 0.70,
+        }}), encoding="utf-8")
+        self.assertFalse(native._same_decision(
+            (62, "WARN", "NEUTRAL", (), 0.85),
+            native._decision_signature(path), "cognitive-controller",
+        ))
+        self.assertTrue(native._same_decision(
+            (62, "WARN", "NEUTRAL", (), None),
+            native._decision_signature(path), "cognitive-controller",
+        ))
 
     def test_retry_rejects_decision_semantic_diff(self):
         sidecar = self.root / f"invest_result_{CODE}_{self.expert}.v3.json"
@@ -321,7 +371,7 @@ class NativeAgentTaskTests(unittest.TestCase):
             done = native.advance(CODE, "experts")
         self.assertEqual(done["status"], "PASS")
         self.assertFalse((self.root / f"invest_native_run_{CODE}.json").exists())
-        archives = list(self.root.glob(f"invest_native_archive_{CODE}_experts_batch1_*"))
+        archives = list(self.root.glob(f"invest_native_archive_{CODE}_experts_{'a' * 24}_*"))
         self.assertTrue(archives)
         self.assertTrue(any(p.name.startswith("plan_") for p in archives[0].iterdir()))
 

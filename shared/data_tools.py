@@ -249,6 +249,19 @@ def _ttm(periods: list[dict], field: str) -> Optional[float]:
 
 # ── 子命令 ──
 
+def _undated_frame_rows(frame: pd.DataFrame, table: str) -> int:
+    if frame.empty or "ann_date" not in frame.columns:
+        return len(frame)
+    fields = ["ann_date"]
+    if table != "fina_indicators" and "f_ann_date" in frame.columns:
+        fields.append("f_ann_date")
+    missing = pd.Series(True, index=frame.index)
+    for field in fields:
+        values = frame[field].astype("string").fillna("").str.strip()
+        missing &= values.eq("")
+    return int(missing.sum())
+
+
 def cmd_sync(ts_code: str, force: bool = False) -> dict:
     ds = create_data_source(CONFIG)
     conn = get_db()
@@ -300,10 +313,27 @@ def cmd_sync(ts_code: str, force: bool = False) -> dict:
                 try:
                     df = fetch_fn(ts_code, start_10y, today_str)
                     if df is None or df.empty:
+                        if table == "fina_audit":
+                            result.setdefault("warnings", []).append(
+                                "fina_audit 当前数据源不可得；分析可降级，但需补齐审计意见"
+                            )
+                            result["skipped"].append("fina_audit:unavailable")
+                            continue
                         raise RuntimeError("数据源返回空表")
+                    undated = _undated_frame_rows(df, table)
+                    if undated:
+                        result.setdefault("warnings", []).append(
+                            f"{table} 有 {undated} 行缺公告日期，已记录并从 as-of 证据排除；需补齐后重跑"
+                        )
                     fetched[table] = df
                 except Exception as exc:
-                    failures[table] = str(exc)
+                    if table == "fina_audit":
+                        result.setdefault("warnings", []).append(
+                            f"fina_audit 当前数据源不可得: {exc}；分析可降级，但需补齐审计意见"
+                        )
+                        result["skipped"].append("fina_audit:unavailable")
+                    else:
+                        failures[table] = str(exc)
             if failures:
                 detail = "; ".join(f"{table}: {reason}" for table, reason in failures.items())
                 raise RuntimeError(f"关键财务表同步不完整，拒绝继续: {detail}")
@@ -684,7 +714,7 @@ def cmd_forecast(ts_code: str) -> dict:
     """获取最近业绩预告（预增/预减/亏损等）"""
     conn = get_db()
     as_of = TODAY.strftime("%Y%m%d")
-    df = pd.read_sql("SELECT ann_date, end_date, type, net_profit_min, net_profit_max, last_parent_net, p_change_min, p_change_max, summary FROM forecast WHERE ts_code=? AND REPLACE(ann_date, '-', '')<=? ORDER BY ann_date DESC LIMIT 3", conn, params=(ts_code, as_of))
+    df = pd.read_sql("SELECT ann_date, end_date, type, net_profit_min, net_profit_max, last_parent_net, p_change_min, p_change_max, summary FROM forecast WHERE ts_code=? AND REPLACE(NULLIF(ann_date,''), '-', '')<=? ORDER BY ann_date DESC LIMIT 3", conn, params=(ts_code, as_of))
     conn.close()
     if df.empty:
         return {"ts_code": ts_code, "has_forecast": False, "message": "无业绩预告数据"}
@@ -911,9 +941,31 @@ def validate_snapshot(data: dict, reference_date: Optional[datetime] = None) -> 
     """对供专家使用的数据快照执行结构与口径门禁。"""
     errors = []
     warnings = []
+    meta = data.get("meta", {})
+    undated_rows = meta.get("undated_financial_rows", {})
+    if not isinstance(undated_rows, dict):
+        undated_rows = {}
+    undated_tables = {
+        key for key, count in undated_rows.items()
+        if isinstance(count, int) and not isinstance(count, bool) and count > 0
+    }
+    if undated_tables:
+        summary = ", ".join(
+            f"{table}={undated_rows[table]}" for table in sorted(undated_tables)
+        )
+        warnings.append(
+            f"公告日期缺失的财务行已从 as-of 快照排除（{summary}）；"
+            "需补齐公告日期后重建分析"
+        )
 
-    def require(condition, message):
-        if not condition:
+    def require(condition, message, *, degrade_for=()):
+        if condition:
+            return
+        if undated_tables.intersection(degrade_for):
+            warnings.append(
+                f"{message}；因公告日期缺失已排除相关数据，当前仅可降级分析并要求补齐"
+            )
+        else:
             errors.append(message)
 
     as_of = reference_date or TODAY
@@ -948,7 +1000,7 @@ def validate_snapshot(data: dict, reference_date: Optional[datetime] = None) -> 
             require(0 <= age <= 7, f"market.trade_date 陈旧或位于未来（相差 {age} 天）")
         except ValueError:
             errors.append(f"market.trade_date 格式非法: {market.get('trade_date')}")
-    require(annual.get("count", 0) >= 1, "annual 无年度利润表")
+    require(annual.get("count", 0) >= 1, "annual 无年度利润表", degrade_for=("income",))
     annual_rows = annual.get("annual_data", [])
     require(annual.get("count") == len(annual_rows), "annual.count 与 annual_data 长度不一致")
     annual_years = [str(item.get("year") or "") for item in annual_rows]
@@ -956,17 +1008,21 @@ def validate_snapshot(data: dict, reference_date: Optional[datetime] = None) -> 
     require(annual_years == sorted(annual_years), "annual_data 年份未按升序排列")
     expected_fiscal_year = as_of.year - 1 if as_of.month >= 5 else as_of.year - 2
     if annual_years:
-        require(annual.get("last_year") in (None, annual_years[-1]),
-                "annual.last_year 与 annual_data 不一致")
+        require(
+            annual.get("last_year") in (None, annual_years[-1]),
+            "annual.last_year 与 annual_data 不一致",
+            degrade_for=("income",),
+        )
         require(
             annual_years[-1] == str(expected_fiscal_year),
             f"annual 最新年度陈旧: {annual_years[-1]} != {expected_fiscal_year}",
+            degrade_for=("income",),
         )
         latest_annual = annual_rows[-1]
         require(_f(latest_annual.get("revenue_yi")) is not None,
-                "annual 最新年度营收缺失")
+                "annual 最新年度营收缺失", degrade_for=("income",))
         require(_f(latest_annual.get("net_profit_yi")) is not None,
-                "annual 最新年度净利润缺失")
+                "annual 最新年度净利润缺失", degrade_for=("income",))
     if len(annual_rows) >= 2 and all(year.isdigit() for year in annual_years):
         # CAGR 必须用原始元值重算：*_yi 是四舍五入到 0.01 亿的展示值，
         # 小利润公司（亿元以下）重算误差可达 1pp，会误杀合法快照。
@@ -994,7 +1050,10 @@ def validate_snapshot(data: dict, reference_date: Optional[datetime] = None) -> 
         warnings.append("annual 少于 3 个年度，成长趋势置信度应降级")
 
     periods = quarterly.get("periods", [])
-    require(len(periods) >= 4, "quarterly 少于 4 个单季")
+    require(
+        len(periods) >= 4, "quarterly 少于 4 个单季",
+        degrade_for=("income", "cashflow"),
+    )
     if len(periods) >= 4:
         quarter_ids = []
         for period in periods[:4]:
@@ -1010,17 +1069,26 @@ def validate_snapshot(data: dict, reference_date: Optional[datetime] = None) -> 
             len(set(quarter_ids)) == 4 and None not in quarter_ids
             and all(quarter_ids[index] - quarter_ids[index + 1] == 1 for index in range(3))
         )
-        require(contiguous, "quarterly 最近四季存在重复、乱序或断裂")
+        require(
+            contiguous, "quarterly 最近四季存在重复、乱序或断裂",
+            degrade_for=("income", "cashflow"),
+        )
         try:
             latest_quarter_end = datetime.strptime(str(periods[0].get("period")), "%Y%m%d")
             quarter_age = (as_of.date() - latest_quarter_end.date()).days
-            require(0 <= quarter_age <= 200,
-                    f"quarterly 最新报告期陈旧或位于未来（相差 {quarter_age} 天）")
+            require(
+                0 <= quarter_age <= 200,
+                f"quarterly 最新报告期陈旧或位于未来（相差 {quarter_age} 天）",
+                degrade_for=("income", "cashflow"),
+            )
         except ValueError:
             errors.append(f"quarterly 最新 period 格式非法: {periods[0].get('period')!r}")
         for field in ("revenue_yi", "net_profit_yi", "ocf_yi"):
-            require(all(_f(period.get(field)) is not None for period in periods[:4]),
-                    f"quarterly 最近四季 {field} 不完整")
+            require(
+                all(_f(period.get(field)) is not None for period in periods[:4]),
+                f"quarterly 最近四季 {field} 不完整",
+                degrade_for=("income", "cashflow"),
+            )
         expected_ocf_complete = contiguous and all(
             _f(period.get("ocf_yi")) is not None for period in periods[:4]
         )
@@ -1028,7 +1096,10 @@ def validate_snapshot(data: dict, reference_date: Optional[datetime] = None) -> 
             quarterly.get("ocf_ttm_complete") is expected_ocf_complete,
             "quarterly.ocf_ttm_complete 与最近四季明细不一致",
         )
-        require(expected_ocf_complete, "quarterly 最近四季不连续或 OCF TTM 不完整")
+        require(
+            expected_ocf_complete, "quarterly 最近四季不连续或 OCF TTM 不完整",
+            degrade_for=("income", "cashflow"),
+        )
         if expected_ocf_complete:
             expected_ocf_ttm = round(sum(_f(period.get("ocf_yi")) for period in periods[:4]), 2)
             require(
@@ -1071,34 +1142,62 @@ def validate_snapshot(data: dict, reference_date: Optional[datetime] = None) -> 
             "单季值基于'视为累计'的不可靠假设还原，TTM 和 FCF 一律禁用"
         )
 
-    require(not balance.get("error") and balance.get("end_date"), "balance 缺少最新年报")
+    require(
+        not balance.get("error") and balance.get("end_date"),
+        "balance 缺少最新年报", degrade_for=("balance",),
+    )
     balance_year = str(balance.get("end_date") or "")[:4]
     if balance.get("end_date"):
-        require(balance_year == str(expected_fiscal_year),
-                f"balance 最新年度陈旧: {balance_year} != {expected_fiscal_year}")
-    require(_f(balance.get("total_assets_yi")) is not None, "balance.total_assets_yi 缺失")
-    require(_f(balance.get("equity_yi")) is not None, "balance.equity_yi 缺失")
+        require(
+            balance_year == str(expected_fiscal_year),
+            f"balance 最新年度陈旧: {balance_year} != {expected_fiscal_year}",
+            degrade_for=("balance",),
+        )
+    require(
+        _f(balance.get("total_assets_yi")) is not None,
+        "balance.total_assets_yi 缺失", degrade_for=("balance",),
+    )
+    require(
+        _f(balance.get("equity_yi")) is not None,
+        "balance.equity_yi 缺失", degrade_for=("balance",),
+    )
     if balance.get("cash_yi") is None:
         warnings.append("balance.cash_yi 未披露，流动性/净现金结论必须降级")
     if balance.get("goodwill_yi") is None:
         warnings.append("balance.goodwill_yi 未披露，必须表述为未知，不得按 0 处理")
     if balance.get("interest_debt_yi") is None:
         warnings.append("balance 有息负债分项不完整，净现金/偿债结论必须降级")
-    require(indicators.get("count", 0) >= 1, "indicators 无年度财务指标")
+    require(
+        indicators.get("count", 0) >= 1, "indicators 无年度财务指标",
+        degrade_for=("fina_indicators",),
+    )
     indicator_rows = indicators.get("indicators", [])
-    require(indicators.get("count") == len(indicator_rows),
-            "indicators.count 与 indicators 长度不一致")
+    require(
+        indicators.get("count") == len(indicator_rows),
+        "indicators.count 与 indicators 长度不一致",
+        degrade_for=("fina_indicators",),
+    )
     if indicator_rows:
-        require(str(indicator_rows[0].get("year") or "") == str(expected_fiscal_year),
-                f"indicators 最新年度陈旧: {indicator_rows[0].get('year')} != {expected_fiscal_year}")
+        require(
+            str(indicator_rows[0].get("year") or "") == str(expected_fiscal_year),
+            f"indicators 最新年度陈旧: {indicator_rows[0].get('year')} != {expected_fiscal_year}",
+            degrade_for=("fina_indicators",),
+        )
         for field in ("roe_pct", "gross_margin_pct", "net_margin_pct", "debt_ratio_pct"):
-            require(_f(indicator_rows[0].get(field)) is not None,
-                    f"indicators 最新年度 {field} 缺失")
-    require(audit.get("has_audit") is True and audit.get("latest", {}).get("audit_result"),
-            "audit 缺少最新年报审计意见")
-    audit_end = str(audit.get("latest", {}).get("end_date") or "")
-    require(audit_end[:4] == str(expected_fiscal_year),
-            f"audit 最新年度陈旧或缺失: {audit_end[:4]!r} != {expected_fiscal_year}")
+            require(
+                _f(indicator_rows[0].get(field)) is not None,
+                f"indicators 最新年度 {field} 缺失",
+                degrade_for=("fina_indicators",),
+            )
+    latest_audit = audit.get("latest", {})
+    if audit.get("has_audit") is not True or not latest_audit.get("audit_result"):
+        warnings.append("audit 缺少最新年报审计意见；当前分析降级，需补齐审计意见")
+    else:
+        audit_end = str(latest_audit.get("end_date") or "")
+        if audit_end[:4] != str(expected_fiscal_year):
+            warnings.append(
+                f"audit 最新年度陈旧或缺失: {audit_end[:4]!r} != {expected_fiscal_year}；需补齐审计意见"
+            )
     market_cap = _f(market.get("total_mv_yi"))
     close = _f(market.get("close"))
     shares = _f(market.get("total_shares_yi"))
@@ -1146,6 +1245,35 @@ def validate_snapshot(data: dict, reference_date: Optional[datetime] = None) -> 
     }
 
 
+def _undated_financial_counts(ts_code: str) -> dict[str, int]:
+    conn = get_db()
+    counts: dict[str, int] = {}
+    try:
+        for table in ("income", "balance", "cashflow", "fina_indicators"):
+            columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+            if not {"ts_code", "end_date", "ann_date"} <= columns:
+                continue
+            date_fields = ["ann_date"]
+            if table != "fina_indicators" and "f_ann_date" in columns:
+                date_fields.append("f_ann_date")
+            date_terms = [f"NULLIF({field}, '')" for field in date_fields]
+            expression = (
+                date_terms[0] if len(date_terms) == 1
+                else "COALESCE(" + ", ".join(date_terms) + ")"
+            )
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE ts_code=? "
+                f"AND end_date IS NOT NULL AND end_date<>'' AND {expression} IS NULL",
+                (ts_code,),
+            ).fetchone()
+            count = int(row[0] or 0) if row else 0
+            if count:
+                counts[table] = count
+    finally:
+        conn.close()
+    return counts
+
+
 def cmd_all(ts_code: str) -> dict:
     data = {"stock_info": cmd_stock_info(ts_code), "market": cmd_market(ts_code),
             "annual": cmd_annual(ts_code), "quarterly": cmd_quarterly(ts_code),
@@ -1158,6 +1286,7 @@ def cmd_all(ts_code: str) -> dict:
         "analysis_date": TODAY.strftime("%Y%m%d"),
         "cross_validated": False,
         "source_note": "主源失败时按表回退备用源；这不是双源交叉验证",
+        "undated_financial_rows": _undated_financial_counts(ts_code),
     }
     data["data_quality"] = validate_snapshot(data)
     return data

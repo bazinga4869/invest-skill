@@ -11,12 +11,13 @@ from unittest.mock import patch
 
 from scripts import collect_results as collect_results_module
 from scripts.assemble_report import (
-    WIKI_ROOT, evaluate_level3, validate_adjudication, validate_devil_challenge,
+    _data_quality_notice, compute_score, evaluate_level3,
+    validate_adjudication, validate_devil_challenge,
 )
 from scripts.collect_challenges import validate_challenge
 from scripts.collect_cross_reviews import (
     CROSS_REVIEWERS, build_aggregate, input_bundle_hash,
-    validate_cross_aggregate,
+    validate_cross_aggregate, validate_cross_review,
 )
 from scripts.collect_results import (
     _annual_locator_section_text, _meaningful_table_rows, _verified_narrative_rows,
@@ -528,6 +529,28 @@ class ReportGateTests(unittest.TestCase):
         self.assertTrue(findings)
         self.assertTrue(all(item["category"] == "meta" for item in findings))
 
+    def test_warn_data_quality_is_visible_as_degraded_and_requires_supplement(self):
+        notice = _data_quality_notice({
+            "status": "WARN",
+            "warnings": [
+                "公告日期缺失的财务行已从 as-of 快照排除（income=12）；需补齐公告日期后重建分析",
+                "audit 缺少最新年报审计意见；当前分析降级，需补齐审计意见",
+            ],
+        })
+        self.assertIn("数据质量与待补齐", notice)
+        self.assertIn("降级数据快照（WARN）", notice)
+        self.assertIn("不代表零", notice)
+        self.assertIn("补齐审计意见", notice)
+        findings = extract_numbers(notice)
+        self.assertTrue(findings)
+        self.assertTrue(all(item["category"] == "meta" for item in findings))
+        self.assertEqual(_data_quality_notice({"status": "PASS", "warnings": []}), "")
+
+    def test_cognitive_multiplier_frontmatter_is_metadata(self):
+        findings = extract_numbers("---\ncognitive_multiplier: 0.85\n---")
+        self.assertTrue(findings)
+        self.assertTrue(all(item["category"] == "meta" for item in findings))
+
     def test_adjudication_weight_table_remains_metadata(self):
         findings = extract_numbers(
             "| 专家 | 评分 | 权重 | 贡献 |\n"
@@ -624,8 +647,12 @@ class ReportGateTests(unittest.TestCase):
             self.assertEqual(result["date_issues"], [])
 
     def test_adjudication_yaml_is_structurally_validated(self):
-        knowledge_hash = hashlib.sha256((WIKI_ROOT / "index.md").read_bytes()).hexdigest()
-        valid = f"""## 综合裁决 — 裁判长
+        with tempfile.TemporaryDirectory() as temp:
+            wiki_root = Path(temp)
+            index = wiki_root / "index.md"
+            index.write_text("test wiki context", encoding="utf-8")
+            knowledge_hash = hashlib.sha256(index.read_bytes()).hexdigest()
+            valid = f"""## 综合裁决 — 裁判长
 
 ```yaml
 ---
@@ -654,8 +681,13 @@ adjudicator:
 
 **加权评分计算过程**
 """
-        self.assertEqual(validate_adjudication(valid), [])
-        self.assertTrue(validate_adjudication(valid.replace("verdict: BUY", "verdict: MAYBE")))
+            with patch("scripts.assemble_report.WIKI_ROOT", wiki_root), patch(
+                "scripts.assemble_report.SAGE_WIKI_ROOT", wiki_root,
+            ):
+                self.assertEqual(validate_adjudication(valid), [])
+                self.assertTrue(
+                    validate_adjudication(valid.replace("verdict: BUY", "verdict: MAYBE"))
+                )
 
     def test_manifest_detects_tampering(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -966,6 +998,39 @@ adjudicator:
         self.assertNotIn("2025年 q1", excerpt)
         self.assertIn("较早年度证据摘录", excerpt)
 
+    def test_v3_cognitive_multiplier_controls_composite_score(self):
+        weight_ids = [
+            expert for expert in MANIFEST_EXPERTS
+            if expert != "cognitive-controller"
+        ]
+        scoring = {
+            "weights": {expert: 1 / len(weight_ids) for expert in weight_ids},
+            "cognitive_adjustment": {"WARN": 0.92, "VETO": 0.70},
+        }
+        results = {
+            expert: (
+                "---\nscore: 50\nverdict: WARN\n"
+                "result_contract: expert-result/v3\n"
+                + ("cognitive_multiplier: 0.70\n" if expert == "cognitive-controller" else "")
+                + "---\n"
+            )
+            for expert in MANIFEST_EXPERTS
+        }
+        raw, adjusted, _scores, _details, adjustment, complete = compute_score(results, scoring)
+        self.assertTrue(complete)
+        self.assertAlmostEqual(raw, 50.0)
+        self.assertEqual(adjustment, 0.70)
+        self.assertAlmostEqual(adjusted, 35.0)
+
+        results["cognitive-controller"] = (
+            "---\nscore: 50\nverdict: WARN\n"
+            "result_contract: expert-result/v3\n---\n"
+        )
+        raw, adjusted, _scores, _details, _adjustment, complete = compute_score(results, scoring)
+        self.assertFalse(complete)
+        self.assertIsNone(raw)
+        self.assertIsNone(adjusted)
+
     def test_level3_machine_trigger_and_exact_embedding(self):
         scoring = {
             "weights": {
@@ -1107,6 +1172,17 @@ cross_verdict: CONFIRM
             aggregate = root / f"invest_cross_blind_{code}.md"
             aggregate.write_text(build_aggregate(code, root), encoding="utf-8")
             self.assertEqual(validate_cross_aggregate(code, root), [])
+            review_path = root / f"invest_cross_result_{code}_{CROSS_REVIEWERS[0]}.md"
+            original_review = review_path.read_text(encoding="utf-8")
+            review_path.write_text(
+                original_review.replace(
+                    "## 遗漏与矛盾\n", "## 遗漏与矛盾\n行业通常如此。\n", 1,
+                ),
+                encoding="utf-8",
+            )
+            cross_problems = validate_cross_review(code, CROSS_REVIEWERS[0], root)
+            self.assertTrue(any("行业对比无来源" in item for item in cross_problems))
+            review_path.write_text(original_review, encoding="utf-8")
             prompt_path = root / f"invest_cross_prompt_{code}_{CROSS_REVIEWERS[0]}.txt"
             result_path = root / f"invest_cross_result_{code}_{CROSS_REVIEWERS[0]}.md"
             mutated = prompt_path.read_bytes().replace("你是".encode(), "你不是".encode(), 1)

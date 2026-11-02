@@ -8,12 +8,13 @@ from scripts.cleanup_intermediates import cleanup_intermediates
 from scripts.prepare_challenges import VALID_CHALLENGE_VERDICTS
 from scripts.preserve_failure_evidence import preserve_failure_evidence
 from scripts.normalize_challenge import normalize_raw
+from scripts import collect_results as collect_results_module
 from scripts.collect_results import _is_table_ordinal, _wiki_path_exists
 from scripts.prepare_prompts import (
-    WIKI_ROOT, annual_locator_catalog, build_expert_prompt, checklist_template,
+    annual_locator_catalog, build_expert_prompt, checklist_template,
     narrative_quote_catalog, self_check_prompts,
 )
-from shared.expert_result_v3 import parse_result
+from shared.expert_result_v3 import build_native_prompt, parse_result
 from scripts.runtime_guard import (
     GuardError, assert_idle, begin_retry, claim_retry, claim_run, read_run_state,
     recover_retry, release_run, retry_state_path,
@@ -135,6 +136,41 @@ class CleanupTests(unittest.TestCase):
             self.assertTrue(other.is_file())
             self.assertTrue(all(not path.exists() for path in target_files))
 
+    def test_cleanup_refuses_to_delete_live_pipeline_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_snapshot(root)
+            lease = claim_run(CODE, "challenges", root)
+            prompt = root / f"invest_challenge_prompt_{CODE}_financial-auditor.txt"
+            prompt.write_text("active", encoding="utf-8")
+            result = cleanup_intermediates(
+                CODE, tmp_root=root, log_root=root / "logs",
+                reports_dir=root / "reports",
+            )
+            self.assertTrue(result["errors"])
+            self.assertTrue(prompt.is_file())
+            self.assertTrue((root / f"invest_expert_run_{CODE}.json").is_file())
+            release_run(CODE, "challenges", root, token=lease["token"])
+
+    def test_finalize_cleanup_preserves_its_run_lease_until_release(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_snapshot(root)
+            lease = claim_run(CODE, "finalize", root)
+            prompt = root / f"invest_prompt_{CODE}_financial-auditor.txt"
+            prompt.write_text("finished", encoding="utf-8")
+            result = cleanup_intermediates(
+                CODE, tmp_root=root, log_root=root / "logs",
+                reports_dir=root / "reports",
+                active_finalize_token=lease["token"],
+            )
+            self.assertFalse(result["errors"])
+            self.assertFalse(result["remaining"])
+            self.assertFalse(prompt.exists())
+            self.assertTrue((root / f"invest_expert_run_{CODE}.json").is_file())
+            release_run(CODE, "finalize", root, token=lease["token"])
+            self.assertFalse((root / f"invest_expert_run_{CODE}.json").exists())
+
     def test_failure_evidence_is_written_and_explicit_cleanup_removes_it(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -198,6 +234,22 @@ challenge_prompt_hash: "__PROMPT_HASH__"
 
 class PromptContractTests(unittest.TestCase):
     def setUp(self):
+        self.wiki_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.wiki_tmp.cleanup)
+        self.wiki_root = Path(self.wiki_tmp.name) / "04_stock-analysis-expert"
+        (self.wiki_root / "experts").mkdir(parents=True)
+        (self.wiki_root / "adjudicator").mkdir(parents=True)
+        (self.wiki_root / "experts" / "01-财务排雷官.md").write_text(
+            "---\ntitle: 财务排雷官\n---\n分析方法 [[_schema]] [[_panel]]\n",
+            encoding="utf-8",
+        )
+        (self.wiki_root / "_schema.md").write_text("结果字段契约", encoding="utf-8")
+        (self.wiki_root / "experts" / "_panel.md").write_text(
+            "面板规则模板 {{F001}}", encoding="utf-8",
+        )
+        (self.wiki_root / "adjudicator" / "裁判长-多框架裁判规则.md").write_text(
+            "---\ntitle: 裁判长-多框架裁判规则\n---\n裁判规则", encoding="utf-8",
+        )
         self.annual = """
 ### 2025年 annual（公告日：20260401，标题：2025年报）
 #### 经营情况讨论与分析
@@ -252,7 +304,7 @@ class PromptContractTests(unittest.TestCase):
         prompt = build_expert_prompt(
             "financial-auditor", "01-财务排雷官", CODE, "测试",
             json.dumps(self.data, ensure_ascii=False), self.annual,
-            "20260731", "20260801", BATCH, WIKI_ROOT,
+            "20260731", "20260801", BATCH, self.wiki_root,
         )
         self.assertIn(
             "04_stock-analysis-expert/experts/01-财务排雷官.md", prompt,
@@ -271,7 +323,7 @@ class PromptContractTests(unittest.TestCase):
         prompt = build_expert_prompt(
             "financial-auditor", "01-财务排雷官", CODE, "测试",
             json.dumps(self.data, ensure_ascii=False), self.annual,
-            "20260731", "20260801", BATCH, WIKI_ROOT,
+            "20260731", "20260801", BATCH, self.wiki_root,
             sage_context=sage,
         )
         self.assertIn(sage, prompt)
@@ -284,7 +336,7 @@ class PromptContractTests(unittest.TestCase):
         prompt = build_expert_prompt(
             "financial-auditor", "01-财务排雷官", CODE, "测试",
             json.dumps(self.data, ensure_ascii=False), self.annual,
-            "20260731", "20260801", BATCH, WIKI_ROOT,
+            "20260731", "20260801", BATCH, self.wiki_root,
         )
         self.assertIn("面板与方法论契约", prompt)
         self.assertIn("04_stock-analysis-expert/_schema.md", prompt)
@@ -295,7 +347,7 @@ class PromptContractTests(unittest.TestCase):
         prompt = build_expert_prompt(
             "financial-auditor", "01-财务排雷官", CODE, "测试",
             json.dumps(self.data, ensure_ascii=False), self.annual,
-            "20260731", "20260801", BATCH, WIKI_ROOT,
+            "20260731", "20260801", BATCH, self.wiki_root,
             sage_context="（示例：staged JSON 正文用 {{F001}} 占位）",
             injected_out=injected,
         )
@@ -308,9 +360,36 @@ class PromptContractTests(unittest.TestCase):
 
     def test_validator_accepts_legacy_chinese_ordinals_and_unique_wikilink(self):
         self.assertTrue(_is_table_ordinal("三"))
-        # 迁移说明：原夹具指向旧 invest-sage 页面；现知识层为投资知识库 AI-Wiki，
-        # 改用面板内真实存在且唯一的页面，保持“唯一 wikilink 可解析”这一契约不变。
-        self.assertTrue(_wiki_path_exists("[[裁判长-多框架裁判规则]]"))
+        with (
+            patch.object(collect_results_module, "WIKI_REPO", self.wiki_root.parent),
+            patch.object(collect_results_module, "WIKI_ROOT", self.wiki_root),
+            patch.object(collect_results_module, "LEGACY_WIKI_REPO", self.wiki_root.parent),
+        ):
+            _wiki_path_exists.cache_clear()
+            self.assertTrue(_wiki_path_exists("[[裁判长-多框架裁判规则]]"))
+            _wiki_path_exists.cache_clear()
+
+
+class CognitiveMultiplierPromptTests(unittest.TestCase):
+    def test_native_cognitive_prompt_includes_multiplier_scale(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            experts = root / "experts"
+            experts.mkdir()
+            (experts / "05-认知风控官.md").write_text(
+                "# 认知风控官", encoding="utf-8",
+            )
+            data = {
+                "market": {"trade_date": "20260731"},
+                "meta": {"analysis_date": "20260801", "batch_id": BATCH},
+            }
+            with patch("shared.expert_result_v3.wiki_expert_root", return_value=root):
+                prompt = build_native_prompt(
+                    expert_id="cognitive-controller", ts_code=CODE,
+                    data=data, annual_text="", original_prompt="",
+                )
+        self.assertIn('"cognitive_multiplier": 0.85', prompt)
+        self.assertIn("1.00、0.92、0.85、0.70", prompt)
 
 
 if __name__ == "__main__":
