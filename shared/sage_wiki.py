@@ -252,18 +252,35 @@ def _write_cache(
 
 
 def _source_paths(content: str, question: str) -> list[str]:
+    repo = sage_wiki_repo().resolve(strict=False)
+    concepts = repo / "wiki" / "concepts"
     paths: list[str] = []
+
+    def safe_repo_path(candidate: Path) -> str | None:
+        try:
+            return candidate.resolve(strict=False).relative_to(repo).as_posix()
+        except (OSError, RuntimeError, ValueError):
+            return None
+
     for slug in re.findall(r"\[\[([^]|#]+)", content):
         slug = slug.strip()
         filename = slug if slug.endswith(".md") else slug + ".md"
-        candidate = sage_wiki_repo() / "wiki" / "concepts" / filename
+        candidate = concepts / filename
+        if safe_repo_path(candidate) is None:
+            continue
         if not candidate.is_file():
-            matches = sorted(sage_wiki_repo().rglob(filename))
-            candidate = matches[0] if matches else candidate
-        if candidate.is_file():
-            path = candidate.relative_to(sage_wiki_repo()).as_posix()
-            if path not in paths:
-                paths.append(path)
+            try:
+                matches = sorted(repo.rglob(filename))
+            except (OSError, ValueError):
+                matches = []
+            candidate = next(
+                (match for match in matches
+                 if match.is_file() and safe_repo_path(match) is not None),
+                candidate,
+            )
+        path = safe_repo_path(candidate) if candidate.is_file() else None
+        if path is not None and path not in paths:
+            paths.append(path)
     if not paths:
         paths.append("query:" + question)
     return paths

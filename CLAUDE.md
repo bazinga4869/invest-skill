@@ -57,17 +57,18 @@ alert.sh 等被调用入口），**不拥有 crontab 条目、不自行注册定
 | `shared/report_wiki.py` | invest-report-wiki 公共 CLI 与 bundle 契约适配器 |
 | `config.yaml` | 项目配置（`paths.runtime_root` 可指定运行时根） |
 
-**运行时产物不落本仓库**：SQLite 数据库、日志、报告、`auto_state.json` 等全部写入
-调用方 `INVEST_SKILL_HOME` 指定的运行时根（本机为
-`~/invest-harness/.invest-skill-runtime/`）。本仓库只保留 skill 资产
-（协议、脚本、静态契约 `data/experts.json` 等）。路径解析统一走
-`shared/project_config.py`（`runtime_root()` / `configured_path()`），不要硬编码。
+**运行时产物不落本仓库**：持久化数据库、报告和 Sage cache 等路径由
+`shared/project_config.py`（`runtime_root()` / `configured_path()`）解析，优先级为
+`INVEST_SKILL_HOME` > `config.yaml paths.runtime_root` > skill 仓库兼容回退。临时 prompt、staging、
+运行锁和阶段结果由 `shared/runtime.py` 的 operation root 解析，优先级为
+`INVEST_RUNTIME_DIR` > `INVEST_SKILL_HOME` > `/tmp` 兼容回退；生产 wrapper 应显式设置私有目录，
+不要依赖系统 `/tmp`。本仓库只保留 skill 资产（协议、脚本、静态契约等），不要硬编码产物路径。
 
 ## Wiki 联动
 
 专家团执行契约仍由本 skill 的 `data/` 和旧版专家文件兼容层提供；通用投资知识
-统一从 `../invest-sage` 通过 `sage-wiki query --scope local --format json` 检索，不直接读取
-Sage 私有数据库；查询结果按专家主题写入 `INVEST_SKILL_HOME/data/sage_wiki_cache/`，
+统一从投资知识库通过 MCP 或 `sage-wiki query --scope local --format json` 检索，不直接读取
+Sage 私有数据库；查询结果按专家主题写入持久化运行时根下的 `data/sage_wiki_cache/`，
 以内容哈希校验并支持 402/超时/网络失败时降级：
 - wiki 中专家依赖的知识页面发生结构性变更时，专家团按自迭代机制更新
 - 每次分析前检查 `_cache.json` 中的 `expert_versions`，若版本落后超过 7 天，提示检查 wiki 更新
@@ -133,7 +134,8 @@ Pipe B 由 `~/ai-berkshire` 独立工程触发。在 ai-berkshire 目录下调�
 | 项 | 现在 |
 |---|---|
 | 工程根 | `/Users/bazinga/.dsh/bot/workspace/invest/invest-skill` |
-| 运行时根 | `../invest-skill-runtime`（已固定在 `config.yaml` 的 `paths.runtime_root`，**不需要** export `INVEST_SKILL_HOME`） |
+| 持久化运行时根 | `../invest-skill-runtime`（已固定在 `config.yaml` 的 `paths.runtime_root`；仅持久化路径使用，**不需要** export `INVEST_SKILL_HOME`） |
+| 临时批次根 | 生产 wrapper 设置 `INVEST_RUNTIME_DIR`；未设置时兼容回退到 `INVEST_SKILL_HOME` 或 `/tmp` |
 | 解释器 | `.venv-macos/bin/python`；或每次开工先 `source ../activate.sh`（把 venv 放到 PATH 最前，避免仓内硬编码 `python3` 踩空） |
 | 数据层 | `../invest-report-wiki`（自带 `.venv-macos`，PDF 依赖 pypdfium2 / pdfplumber） |
 | 知识层 | `../invest-kb`（投资知识库 AI-Wiki 的桥接仓）：`wiki/concepts/` 是**生成物禁改**，`04_stock-analysis-expert/` 是**人手维护的专家面板** |

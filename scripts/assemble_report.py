@@ -78,8 +78,9 @@ def load_expert_ids():
     return [e["id"] for e in data["experts"]]
 
 EXPERTS = load_expert_ids()
+COGNITIVE_MULTIPLIERS = (1.0, 0.92, 0.85, 0.70)
 
-# 认知风控官不参与加权（wiki 规则），其 VETO/WARN 作为修正系数
+# 认知风控官不参与加权（wiki 规则），其分级乘数调整综合分
 EXPECTED_WEIGHT_KEYS = {
     "financial-auditor", "value-valuator", "moat-analyst",
     "growth-assessor", "management-auditor", "macro-cyclist",
@@ -250,11 +251,21 @@ def compute_score(results: dict, scoring: dict) -> tuple:
             score = None
         if score is None:
             complete = False
+        multiplier = fm.get("cognitive_multiplier")
+        multiplier_valid = (
+            not isinstance(multiplier, bool)
+            and isinstance(multiplier, (int, float))
+            and float(multiplier) in COGNITIVE_MULTIPLIERS
+        )
+        if expert_id == "cognitive-controller" and (
+                fm.get("result_contract") == "expert-result/v3" and not multiplier_valid):
+            complete = False
         scores[expert_id] = {
             "score": score,
             "verdict": fm.get("verdict", "UNKNOWN"),
             "conclusion_direction": fm.get("conclusion_direction", "UNKNOWN"),
             "veto_triggers": fm.get("veto_triggers", []),
+            "cognitive_multiplier": float(multiplier) if multiplier_valid else None,
         }
 
     if not complete:
@@ -271,7 +282,9 @@ def compute_score(results: dict, scoring: dict) -> tuple:
     cognitive = scores.get("cognitive-controller", {})
     # 优先读取专家输出的分级乘数（0.70-1.00），不存在时回退到 verdict 二元映射
     cognitive_multiplier = cognitive.get("cognitive_multiplier")
-    if isinstance(cognitive_multiplier, (int, float)) and 0.5 <= cognitive_multiplier <= 1.0:
+    if (not isinstance(cognitive_multiplier, bool)
+            and isinstance(cognitive_multiplier, (int, float))
+            and float(cognitive_multiplier) in COGNITIVE_MULTIPLIERS):
         adjustment = float(cognitive_multiplier)
     else:
         cognitive_verdict = cognitive.get("verdict", "PASS")
@@ -1195,7 +1208,7 @@ def validate_adjudication(draft: str, results: dict | None = None,
     return problems
 
 
-def _main_locked(args: argparse.Namespace, ts_code: str) -> int:
+def _main_locked(args: argparse.Namespace, ts_code: str, run_token: str) -> int:
     try:
         record_execution(
             ts_code, "finalize" if args.finalize else "assemble",
@@ -1489,6 +1502,13 @@ def _main_locked(args: argparse.Namespace, ts_code: str) -> int:
         _write_durable(manifest_tmp, json.dumps(manifest, ensure_ascii=False, indent=2))
         os.replace(manifest_tmp, manifest_path)
         publish_marker = manifest_path.parent / ".published.json"
+        manifest_check = verify_manifest(str(archived_final), require_publication=False)
+        if manifest_check.get("status") != "PASS":
+            temp_file.unlink(missing_ok=True)
+            print(f"✗ 发布前 manifest 复核失败: {manifest_check}", file=sys.stderr)
+            return 1
+        # 先原子发布正式报告；只有这一步成功后才写可供历史分析信任的 receipt。
+        os.replace(temp_file, final_file)
         _write_durable(
             publish_marker,
             json.dumps({
@@ -1498,20 +1518,21 @@ def _main_locked(args: argparse.Namespace, ts_code: str) -> int:
                 "published_at": datetime.now().astimezone().isoformat(),
             }, ensure_ascii=False, indent=2) + "\n",
         )
-        manifest_check = verify_manifest(str(archived_final))
-        if manifest_check.get("status") != "PASS":
-            temp_file.unlink(missing_ok=True)
+        publication_check = verify_manifest(str(archived_final))
+        if publication_check.get("status") != "PASS":
             publish_marker.unlink(missing_ok=True)
-            print(f"✗ 发布前 manifest 复核失败: {manifest_check}", file=sys.stderr)
+            print(f"✗ 正式报告已发布，但 publication receipt 复核失败: {publication_check}",
+                  file=sys.stderr)
             return 1
-        # 所有可能失败的必要门禁均已完成；最后一步才替换正式路径。
-        os.replace(temp_file, final_file)
         print(f"✓ 正式报告已原子发布: {final_file}")
         print(f"✓ 审计证据已归档: {manifest_path}")
         if os.environ.get("INVEST_DEFER_CLEANUP") == "1":
             print("✓ 已按外层复核契约延后中间文件清理")
             return 0
-        cleanup = cleanup_intermediates(ts_code, reports_dir=REPORTS_DIR)
+        cleanup = cleanup_intermediates(
+            ts_code, reports_dir=REPORTS_DIR,
+            active_finalize_token=run_token,
+        )
         if cleanup["errors"] or cleanup["remaining"]:
             print(
                 f"✗ 报告已发布，但中间文件清理不完整: "
@@ -1610,7 +1631,7 @@ def main() -> int:
         print(f"✗ {exc}", file=sys.stderr)
         return 2
     try:
-        return _main_locked(args, ts_code)
+        return _main_locked(args, ts_code, str(lease["token"]))
     finally:
         try:
             release_run(ts_code, "finalize", token=lease["token"])

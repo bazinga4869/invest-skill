@@ -13,7 +13,7 @@ from scripts.prepare_prompts import (
     WIKI_ROOT, annual_locator_catalog, build_expert_prompt, checklist_template,
     narrative_quote_catalog, self_check_prompts,
 )
-from shared.expert_result_v3 import parse_result
+from shared.expert_result_v3 import build_native_prompt, parse_result
 from scripts.runtime_guard import (
     GuardError, assert_idle, begin_retry, claim_retry, claim_run, read_run_state,
     recover_retry, release_run, retry_state_path,
@@ -134,6 +134,41 @@ class CleanupTests(unittest.TestCase):
             self.assertTrue(final_report.is_file())
             self.assertTrue(other.is_file())
             self.assertTrue(all(not path.exists() for path in target_files))
+
+    def test_cleanup_refuses_to_delete_live_pipeline_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_snapshot(root)
+            lease = claim_run(CODE, "challenges", root)
+            prompt = root / f"invest_challenge_prompt_{CODE}_financial-auditor.txt"
+            prompt.write_text("active", encoding="utf-8")
+            result = cleanup_intermediates(
+                CODE, tmp_root=root, log_root=root / "logs",
+                reports_dir=root / "reports",
+            )
+            self.assertTrue(result["errors"])
+            self.assertTrue(prompt.is_file())
+            self.assertTrue((root / f"invest_expert_run_{CODE}.json").is_file())
+            release_run(CODE, "challenges", root, token=lease["token"])
+
+    def test_finalize_cleanup_preserves_its_run_lease_until_release(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_snapshot(root)
+            lease = claim_run(CODE, "finalize", root)
+            prompt = root / f"invest_prompt_{CODE}_financial-auditor.txt"
+            prompt.write_text("finished", encoding="utf-8")
+            result = cleanup_intermediates(
+                CODE, tmp_root=root, log_root=root / "logs",
+                reports_dir=root / "reports",
+                active_finalize_token=lease["token"],
+            )
+            self.assertFalse(result["errors"])
+            self.assertFalse(result["remaining"])
+            self.assertFalse(prompt.exists())
+            self.assertTrue((root / f"invest_expert_run_{CODE}.json").is_file())
+            release_run(CODE, "finalize", root, token=lease["token"])
+            self.assertFalse((root / f"invest_expert_run_{CODE}.json").exists())
 
     def test_failure_evidence_is_written_and_explicit_cleanup_removes_it(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -311,6 +346,28 @@ class PromptContractTests(unittest.TestCase):
         # 迁移说明：原夹具指向旧 invest-sage 页面；现知识层为投资知识库 AI-Wiki，
         # 改用面板内真实存在且唯一的页面，保持“唯一 wikilink 可解析”这一契约不变。
         self.assertTrue(_wiki_path_exists("[[裁判长-多框架裁判规则]]"))
+
+
+class CognitiveMultiplierPromptTests(unittest.TestCase):
+    def test_native_cognitive_prompt_includes_multiplier_scale(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            experts = root / "experts"
+            experts.mkdir()
+            (experts / "05-认知风控官.md").write_text(
+                "# 认知风控官", encoding="utf-8",
+            )
+            data = {
+                "market": {"trade_date": "20260731"},
+                "meta": {"analysis_date": "20260801", "batch_id": BATCH},
+            }
+            with patch("shared.expert_result_v3.wiki_expert_root", return_value=root):
+                prompt = build_native_prompt(
+                    expert_id="cognitive-controller", ts_code=CODE,
+                    data=data, annual_text="", original_prompt="",
+                )
+        self.assertIn('"cognitive_multiplier": 0.85', prompt)
+        self.assertIn("1.00、0.92、0.85、0.70", prompt)
 
 
 if __name__ == "__main__":

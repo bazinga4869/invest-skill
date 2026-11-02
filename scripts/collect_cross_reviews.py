@@ -109,7 +109,7 @@ def validate_cross_review(code: str, reviewer: str,
     if unsupported:
         problems.append(
             "存在未充分核对的行业/历史断言: "
-            + str([f"L{item['line']}:{item['reason']}" for item in unsupported[:8]])
+            + str([f"L{item['line']}:{item['label']}" for item in unsupported[:8]])
         )
     return problems
 

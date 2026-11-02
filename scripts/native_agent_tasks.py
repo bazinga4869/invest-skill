@@ -39,6 +39,7 @@ from shared.runtime import RUNTIME_ROOT
 PHASES = ("experts", "challenges", "cross-reviews")
 PLAN_SCHEMA = "invest-skill.native-agent-plan.v1"
 MAX_EXPERT_REPAIR_PASSES = 3
+COGNITIVE_MULTIPLIERS = (1.0, 0.92, 0.85, 0.70)
 MAX_TASK_PROMPT_BYTES = 256 * 1024
 MAX_ESTIMATED_PROMPT_TOKENS = 80_000
 UNRESOLVED_PLACEHOLDER_RE = re.compile(r"(?<!\{)\{[A-Za-z_][A-Za-z0-9_]*\}(?!\})")
@@ -88,16 +89,53 @@ def _plan_path(code: str) -> Path:
     return RUNTIME_ROOT / f"invest_native_run_{code}.json"
 
 
+def _runtime_child(path_value: object, label: str) -> Path:
+    if not isinstance(path_value, str) or not path_value:
+        raise NativeTaskError(f"计划中的 {label} 路径缺失或非法")
+    path = Path(path_value)
+    try:
+        path.resolve(strict=False).relative_to(RUNTIME_ROOT.resolve())
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise NativeTaskError(f"计划中的 {label} 路径越出运行时根: {path}") from exc
+    return path
+
+
 def _load_plan(code: str) -> dict:
     path = _plan_path(code)
-    if not path.is_file():
-        raise NativeTaskError(f"没有活动的 host-native 计划: {path}")
+    if path.is_symlink() or not path.is_file():
+        raise NativeTaskError(f"没有安全可读的 host-native 计划: {path}")
     try:
+        path.resolve(strict=False).relative_to(RUNTIME_ROOT.resolve())
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise NativeTaskError(f"host-native 计划损坏: {path}: {exc}") from exc
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        raise NativeTaskError(f"host-native 计划损坏或越出运行时根: {path}: {exc}") from exc
     if not isinstance(value, dict) or value.get("schema_version") != PLAN_SCHEMA:
         raise NativeTaskError(f"host-native 计划 schema 非法: {path}")
+    if value.get("ts_code") != code or value.get("phase") not in PHASES:
+        raise NativeTaskError(f"host-native 计划标的或阶段非法: {path}")
+    batch_id = value.get("batch_id")
+    transaction_id = value.get("transaction_id")
+    if not isinstance(batch_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", batch_id):
+        raise NativeTaskError("host-native 计划 batch_id 非法")
+    if not isinstance(transaction_id, str) or not re.fullmatch(r"[0-9a-f]{24}", transaction_id):
+        raise NativeTaskError("host-native 计划 transaction_id 非法")
+    jobs = value.get("jobs")
+    if not isinstance(jobs, list) or not jobs:
+        raise NativeTaskError("host-native 计划 jobs 非法")
+    allowed_ids = set(_ids_for_phase(value["phase"]))
+    seen: set[str] = set()
+    for job in jobs:
+        if not isinstance(job, dict):
+            raise NativeTaskError("host-native 计划 job 非法")
+        worker_id = job.get("id")
+        if not isinstance(worker_id, str) or worker_id not in allowed_ids or worker_id in seen:
+            raise NativeTaskError("host-native 计划 worker id 非法或重复")
+        seen.add(worker_id)
+        _runtime_child(job.get("staged_output_path"), "staging")
+        expected_result = _result_path(code, value["phase"], worker_id)
+        if job.get("result_path") != str(expected_result):
+            raise NativeTaskError(f"host-native 计划结果目标被篡改: {worker_id}")
+        _runtime_child(job.get("result_path"), "result")
     return value
 
 
@@ -147,10 +185,20 @@ def _decision_baseline_path(code: str, expert_id: str) -> Path:
 
 
 def _evidence_dir(plan: dict) -> Path:
-    return RUNTIME_ROOT / (
-        f"invest_native_archive_{plan['ts_code']}_{plan['phase']}_"
-        f"{plan['batch_id']}_{plan['transaction_id']}"
-    )
+    try:
+        code = normalize_ts_code(str(plan["ts_code"]))
+        phase = str(plan["phase"])
+        batch_id = str(plan["batch_id"])
+        transaction_id = str(plan["transaction_id"])
+    except (KeyError, ValueError) as exc:
+        raise NativeTaskError("native archive identity 非法") from exc
+    if (phase not in PHASES
+            or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", batch_id)
+            or not re.fullmatch(r"[0-9a-f]{24}", transaction_id)):
+        raise NativeTaskError("native archive 路径组件非法")
+    path = RUNTIME_ROOT / f"invest_native_archive_{code}_{phase}_{batch_id}_{transaction_id}"
+    _runtime_child(str(path), "native archive")
+    return path
 
 
 def _archive_evidence(plan: dict, label: str) -> None:
@@ -543,7 +591,7 @@ def begin(code: str, phase: str, retry: bool) -> dict:
                 release_run(code, "native", RUNTIME_ROOT, token=token)
             except GuardError:
                 pass
-        path.unlink(missing_ok=True)
+            path.unlink(missing_ok=True)
         raise
 
 
@@ -570,7 +618,7 @@ def _extract_decision(path: Path) -> dict | None:
 
 
 def _decision_signature(path: Path) -> tuple | None:
-    """Return only decision fields for fail-closed trace-repair comparison."""
+    """Return frozen decision fields for fail-closed trace-repair comparison."""
     decision = _extract_decision(path)
     if not decision:
         return None
@@ -584,9 +632,26 @@ def _decision_signature(path: Path) -> tuple | None:
                 or not isinstance(veto, list)
                 or any(not isinstance(item, str) for item in veto)):
             return None
-        return score, verdict, direction, tuple(veto)
+        multiplier = decision.get("cognitive_multiplier")
+        if (isinstance(multiplier, bool) or not isinstance(multiplier, (int, float))
+                or float(multiplier) not in COGNITIVE_MULTIPLIERS):
+            multiplier = None
+        else:
+            multiplier = float(multiplier)
+        return score, verdict, direction, tuple(veto), multiplier
     except TypeError:
         return None
+
+
+def _same_decision(previous: tuple | None, repaired: tuple | None,
+                   expert_id: str) -> bool:
+    if previous is None or repaired is None or previous[:4] != repaired[:4]:
+        return False
+    if expert_id == "cognitive-controller" and previous[4] is None:
+        # A malformed first output has no score multiplier to freeze; allow the
+        # repair to supply one while keeping the original four decision fields.
+        return repaired[4] in COGNITIVE_MULTIPLIERS
+    return previous[4] == repaired[4]
 
 
 def _expert_structure_signature(path: Path) -> dict | None:
@@ -760,6 +825,10 @@ def _commit_unlocked(code: str, phase: str, worker_id: str, child_id: str) -> di
         raise NativeTaskError("staging 不是合法 UTF-8") from exc
     content_hash = hashlib.sha256(raw_bytes).hexdigest()
     result = Path(job["result_path"])
+    expected_result = _result_path(code, phase, worker_id)
+    if result != expected_result:
+        raise NativeTaskError(f"host-native 结果目标与官方路径不一致: {result}")
+    _runtime_child(str(result), "result")
     previous_review = (
         _review_signature(result, phase)
         if plan.get("retry") and phase in {"challenges", "cross-reviews"}
@@ -822,7 +891,7 @@ def _commit_unlocked(code: str, phase: str, worker_id: str, child_id: str) -> di
         if plan.get("retry") and previous_decision is not None:
             repaired_decision = _decision_signature(compiled_sidecar)
             reason = None
-            if repaired_decision is None or repaired_decision != previous_decision:
+            if not _same_decision(previous_decision, repaired_decision, worker_id):
                 reason = (
                     "trace-only repair semantic diff: decision.score/verdict/"
                     "conclusion_direction/veto_triggers changed or missing; "

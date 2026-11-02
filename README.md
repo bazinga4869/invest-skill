@@ -1,31 +1,30 @@
 # invest-skill
 
-基于 invest-sage Sage Wiki 知识检索构建的独立投研工具集。
+面向 A 股公司的可审计投研工具集，包含结构化数据管道、分析 skill 和发布门禁。
 
-**重要**：本项目与 invest-sage、invest-report-wiki 是独立项目。数据库、报告输出均存放在本项目目录下，不混入知识库内容区。
+**重要**：本仓库与知识库、财报语料仓库是独立项目。数据库、报告、日志、批次 prompt 和其他运行时产物不属于 skill 资产，也不应提交到本仓库。持久化数据/报告路径由 `config.yaml` 的 `paths.runtime_root` 配置，可由 `INVEST_SKILL_HOME` 覆盖；临时批次文件优先使用宿主设置的 `INVEST_RUNTIME_DIR`，其次使用 `INVEST_SKILL_HOME`。两者都未设置时，部分旧入口仍兼容回退到 `/tmp`；生产运行应由宿主 wrapper 显式配置私有运行时目录。
 
 ## 项目关系
 
 ```
-/home/bazinga/
-├── invest-sage/          # Sage Wiki 投资知识库
-│   ├── 10_meta/公司综合分析 Skill.md
-│   ├── 10_meta/Wiki-Skill 联动规范.md
-│   └── ...
-├── invest-report-wiki/   # 公司财报原件、逐页证据与本地 FTS/BM25（Sage 摘要可选）
-└── invest-skill/         # 本工程：结构化数据管道 + 分析 skill
-    ├── SKILL.md           # Skill 定义（分析协议、专家团架构）
-    ├── shared/            # 数据获取工具
-    ├── config.yaml        # 与 wiki 的显式契约
-    ├── schema.sql         # 自包含的数据库 schema
-    ├── data/              # SQLite 数据库（gitignore）
-    └── reports/           # 综合报告输出（gitignore）
+workspace/
+├── invest-kb/             # 投研知识库桥接仓
+├── invest-report-wiki/    # 公司财报原件、逐页证据与本地 FTS5/BM25
+├── invest-skill/          # 本仓库：数据管道 + 分析 skill
+│   ├── SKILL.md            # 分析协议与专家团执行流程
+│   ├── shared/             # 数据源、路径和证据契约
+│   ├── scripts/            # 准备、执行、验证和发布入口
+│   └── data/               # 版本化的静态契约文件
+└── invest-skill-runtime/  # 配置的运行时目录；不在本仓库内
 ```
 
 ## 快速开始
 
 ```bash
-cd /home/bazinga/invest-skill
+cd /path/to/invest-skill
+
+# 需要 Python 3.10 或更新版本
+python3 --version
 
 # 安装依赖
 pip install -r requirements.txt
@@ -39,7 +38,7 @@ cp .env.example .env
 
 # 使用 DSH 分析（通过 SKILL.md 定义的协议）
 # 在 DSH Web GUI 中让 agent 加载 invest-skill 后说"分析 贵州茅台"即可；
-# 定时分析由宿主 invest-harness 调度（crontab → scripts/cron/cron_daily_analysis.sh → 本工程执行器）
+# 定时分析由宿主 invest-harness 调度，其 wrapper 调用本仓库 scripts/cron_trigger.sh
 ```
 
 ### Token 配置说明
@@ -53,7 +52,7 @@ cp .env.example .env
 ## 核心设计
 
 1. **显式依赖**：数据库、报告目录和 wiki 根路径由 `config.yaml` 统一解析
-2. **自包含**：`schema.sql`、`config.yaml`、数据目录、报告目录都在本项目中
+2. **资产与运行时分离**：`schema.sql`、`config.yaml` 和版本化数据契约属于本项目；数据库、报告及其他运行时数据写入配置的运行时目录
 3. **数据源抽象**：`shared/data_source.py` 实现 Tushare 主源 + AKShare 备用源，主源失败自动回退
 4. **批次绑定**：数据、report-wiki bundle/corpus、年报视图、方法论 wiki 和 prompt 合并生成内容寻址 `batch_id`
 5. **可审计**：7 个专业域 0~100 打分，由裁判长综合，完整证据和执行元数据进入 manifest
@@ -71,8 +70,7 @@ cp .env.example .env
 - **策略**：每次请求先走 Tushare；若失败或返回空，自动切换到 AKShare
 - 所有数据统一清洗为 Tushare 风格列名，下游无感
 
-通用投资知识通过 `sage-wiki query --scope local --project /home/bazinga/invest-sage --format json`
-检索；专家角色和机器门禁仍属于本 skill 的执行契约。
+通用投资知识通过 `invest-kb` 提供的 MCP 服务或 `sage-wiki` shim 检索，路径与服务由宿主环境配置；不要在调用命令中硬编码工作区绝对路径。专家角色和机器门禁仍属于本 skill 的执行契约。
 
 核心原则：
 - wiki 变更方法论页面时，需检查本 skill 是否需要同步更新

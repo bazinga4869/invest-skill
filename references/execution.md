@@ -57,7 +57,7 @@ python3 scripts/runtime_guard.py recover-retry <code> <phase>
 export INVEST_RUNTIME_DIR=/absolute/private/runtime
 ```
 
-不要设置为 `/`，也不要在阶段之间改变。未显式设置时继承 `INVEST_SKILL_HOME`。
+不要设置为 `/`，也不要在阶段之间改变。未显式设置时使用 `INVEST_SKILL_HOME`；两者都未设置时，当前兼容实现回退到 `/tmp`。`config.yaml paths.runtime_root` 仅供持久化路径解析，不会自动成为该临时运行根；生产入口应显式配置宿主运行目录。
 每个认知阶段会更新 `invest_execution_<code>.json`；host-native 模式记录
 `backend=host-native`、`model=inherit-parent`、批次、并发、修复轮数、child id 与全部状态事件，不伪造或猜测具体 provider。finalize 必须写入 `GATES PASS` 并把执行元数据、adjudication/verification/publication receipts 纳入发布链。
 

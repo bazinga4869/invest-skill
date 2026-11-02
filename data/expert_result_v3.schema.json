@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.invest-skill.local/expert-result-v3.schema.json",
+  "title": "Invest Skill Expert Result v3",
+  "description": "Structural contract for expert-result/v3. Data-bound identity, checklist membership, references, and prose constraints are additionally enforced by shared.expert_result_v3.validate_result.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "identity",
+    "decision",
+    "summary",
+    "analysis_sections",
+    "narrative_checks",
+    "risks",
+    "checklist_conclusions",
+    "data_usage"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "expert-result/v3"
+    },
+    "identity": {
+      "type": "object",
+      "required": ["expert_id", "ts_code", "data_date", "analysis_date", "batch_id"],
+      "properties": {
+        "expert_id": {"type": "string", "minLength": 1},
+        "ts_code": {"type": "string", "pattern": "^[0-9]{6}\\.(SH|SZ|BJ)$"},
+        "data_date": {"type": ["string", "null"]},
+        "analysis_date": {"type": "string", "minLength": 1},
+        "batch_id": {"type": "string", "minLength": 1}
+      }
+    },
+    "decision": {
+      "type": "object",
+      "required": ["score", "verdict", "conclusion_direction", "veto_triggers"],
+      "properties": {
+        "score": {"type": "integer", "minimum": 0, "maximum": 100},
+        "verdict": {"enum": ["PASS", "WARN", "VETO"]},
+        "conclusion_direction": {"enum": ["POSITIVE", "NEUTRAL", "NEGATIVE"]},
+        "veto_triggers": {"type": "array", "items": {"type": "string"}},
+        "cognitive_multiplier": {"type": "number", "enum": [1.0, 0.92, 0.85, 0.70]}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"verdict": {"const": "VETO"}}, "required": ["verdict"]},
+          "then": {"properties": {"veto_triggers": {"minItems": 1}}},
+          "else": {"properties": {"veto_triggers": {"maxItems": 0}}}
+        }
+      ]
+    },
+    "summary": {"type": "string", "minLength": 4},
+    "analysis_sections": {
+      "type": "array",
+      "minItems": 5,
+      "items": {
+        "type": "object",
+        "required": ["heading", "body"],
+        "properties": {
+          "heading": {"type": "string", "minLength": 4},
+          "body": {"type": "string", "minLength": 4}
+        }
+      }
+    },
+    "narrative_checks": {
+      "type": "array",
+      "minItems": 3,
+      "items": {
+        "type": "object",
+        "required": ["quote_id", "assessment", "fact_ids", "analysis"],
+        "properties": {
+          "quote_id": {"type": "string", "pattern": "^Q[0-9]{2}$"},
+          "assessment": {"enum": ["CONFIRMED", "PARTIAL", "CONTRADICTED", "UNKNOWN"]},
+          "fact_ids": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "pattern": "^F[0-9]{3}$"}
+          },
+          "analysis": {"type": "string", "minLength": 4}
+        }
+      }
+    },
+    "risks": {
+      "type": "array",
+      "minItems": 3,
+      "items": {"type": "string", "minLength": 4}
+    },
+    "checklist_conclusions": {
+      "type": "object",
+      "propertyNames": {"minLength": 1},
+      "additionalProperties": {"type": "string", "minLength": 4}
+    },
+    "data_usage": {"type": "string", "minLength": 4},
+    "transport_repairs": {
+      "type": "array",
+      "items": {
+        "enum": ["escaped-control-character", "inserted-missing-container-closer"]
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "identity": {
+            "properties": {"expert_id": {"const": "cognitive-controller"}},
+            "required": ["expert_id"]
+          }
+        },
+        "required": ["identity"]
+      },
+      "then": {"properties": {"decision": {"required": ["cognitive_multiplier"]}}},
+      "else": {"properties": {"decision": {"not": {"required": ["cognitive_multiplier"]}}}}
+    }
+  ]
+}

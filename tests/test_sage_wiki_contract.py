@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from shared.sage_wiki import (
-    SageHit, SageWikiError, collect_expert_contexts,
+    SageHit, SageWikiError, _source_paths, collect_expert_contexts,
 )
 
 
@@ -111,6 +111,25 @@ class SageWikiCacheTests(unittest.TestCase):
                     [EXPERT], now=now + dt.timedelta(days=1),
                 )
         self.assertIn("content_sha256 重算不一致", str(raised.exception))
+
+
+class SageSourcePathTests(unittest.TestCase):
+    def test_external_and_traversal_links_are_ignored(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "sage"
+            concepts = repo / "wiki" / "concepts"
+            concepts.mkdir(parents=True)
+            outside = root / "outside.md"
+            outside.write_text("not a wiki page", encoding="utf-8")
+            (concepts / "cash-flow.md").write_text("trusted", encoding="utf-8")
+            (concepts / "escape.md").symlink_to(outside)
+            content = (
+                f"[[{outside}]] [[../../../outside.md]] [[escape]] [[cash-flow]]"
+            )
+            with patch("shared.sage_wiki.sage_wiki_repo", return_value=repo):
+                paths = _source_paths(content, "cash flow query")
+        self.assertEqual(paths, ["wiki/concepts/cash-flow.md"])
 
 
 if __name__ == "__main__":

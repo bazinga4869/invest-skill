@@ -46,7 +46,7 @@ META_LINE_PATTERN = re.compile(
     r'^\s*(?:score|data_date|analysis_date|batch_id|expert_id|ts_code|verdict|'
     r'veto_triggers|conclusion_direction|expert_result_hash|challenge_prompt_hash|challenge_verdict|reviewer_id|input_bundle_hash|'
     r'level3_hash|reviewer_ids|cross_prompt_hash|cross_verdict|composite_score|'
-    r'composite_score_raw|cognitive_adjustment|max_allocation_pct)\s*:|'
+    r'composite_score_raw|cognitive_adjustment|cognitive_multiplier|max_allocation_pct)\s*:|'
     r'(?:总分|满分|评分|得分|权重|贡献分|扣分|覆盖率|专家分数|分析日期|数据基准日|'
     r'生成时间|股票代码|批次标识|报告版本|分析模式|生成方式)',
     re.IGNORECASE,
