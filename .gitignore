@@ -47,3 +47,6 @@ outputs/
 output/
 experts/
 analysis_*.md
+
+# Editor local state
+.obsidian/
