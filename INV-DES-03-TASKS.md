@@ -1096,6 +1096,7 @@
 | ③ | 预检失败 staging 走 reject-precheck 留证 | `6f644dd3d902302b47f133bc4658c582b21fb473` |
 | ② | 仓位建议必须声明 scope，通用研究不得输出个性化动作 | `78adb0a8186b9af20eb87f6e3bc28403e3c259a8` |
 | ④ | 台账/收尾（本提交） | 见本提交自身 SHA |
+| ⑤ | 批次控制面 schema 纳入版本控制（收尾验证发现） | `4f17559`（amend 后以最终 SHA 为准） |
 
 作者与授权：用户 2026-11-03 22:52:19 在会话「评审 Skill」（`session-c6fcd5fb-17e6-4c8b-ba8a-3df80a3f0e7b`）授权「先解决高优先级问题」；①②③ 代码由原生子代理 `73416957-89f6-418c-b2cd-21db28aa90d7`（agentProvider=openai-codex，gpt-6.1-sol，delegationDepth=1，label「修复发布与仓位门禁」）在 `scripts/ shared/ tests/` 内实现，任务书明令禁止修改专家面板、不运行实际投资分析、不提交 git；`SKILL.md`、`references/execution.md`、`references/report-gates.md` 由父会话同日修改。三份代码/测试此前从未进入 git。
 
@@ -1107,3 +1108,5 @@
 - `DEFECT-02`：`config.yaml:26` 的 `wiki_dependencies.repo_path: ../invest-kb` 解析为 `/Volumes/MacData/workspace/invest-kb`（不存在）；真实 invest-kb 在 `/Users/bazinga/.dsh/bot/workspace/invest/invest-kb`。这是 MacData 副本仍指移植前路径的**环境缺陷**，导致 `test_runtime_contracts.PromptContractTests` 4 个 `FileNotFoundError` 与 1 个 `_wiki_path_exists` 断言假；与本批 ①②③ 改动无关。
 - `DEFECT-03`：`SKILL.md:212` 自述「准备入口不能安全纳入这些资料时，停止个性化建议」，与实现口径需在批次之间复核；对外文案不得称「已支持个性化采集」。
 - `DEFECT-04`：`.obsidian/` 下 4 个编辑器状态 JSON 为本地工作区文件，已加入 `.gitignore`，不入库。
+- `DEFECT-05`（已修复并随 ⑤ 提交）：`data/expert_result_v3.schema.json` 列于 `shared/contracts.py:19` 的 `BATCH_CONTRACT_FILES`，却被 `.gitignore` 的 `data/*` 规则忽略，从未入库；干净克隆缺该文件时 `native_agent_tasks` 全部 fail closed（`FileNotFoundError: 批次控制面文件缺失`）。已在 `.gitignore` 加例外并提交该 schema（SHA-256 `c3cd98c09dd44a3a9e686d35e9ec83b25c78f8b6bd0877b4fc7c73a0592c49b3`，64 行）；`data/invest_skill.db` 与 `data/*.bak-*` 仍保持忽略。
+- `DEFECT-06`：主工作树仍有 8 份未跟踪文档（3 份 `INV-BATCH-08-REPAIR-*`、`INV-DES-03-STATIC-INVENTORY-PLAN-01.md`、`INV-DES-03-STOCK-SCREENER-BOUNDARY-DESIGN.md`、`INV-DES-03-TEST-ISOLATION-DESIGN.md`、`INV-DES-05.md`、`INV-SMOKE-03-DESIGN-01.md`），本轮未纳入提交，归属与是否入库待 PM 与作者确认。

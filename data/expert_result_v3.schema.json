@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "expert-result/v3",
+  "title": "invest-skill ExpertResult v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "identity", "decision", "summary", "analysis_sections",
+    "narrative_checks", "risks", "checklist_conclusions", "data_usage"
+  ],
+  "properties": {
+    "schema_version": {"const": "expert-result/v3"},
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expert_id", "ts_code", "data_date", "analysis_date", "batch_id"],
+      "properties": {
+        "expert_id": {"type": "string"},
+        "ts_code": {"type": "string"},
+        "data_date": {"type": "string"},
+        "analysis_date": {"type": "string"},
+        "batch_id": {"type": "string"}
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["score", "verdict", "conclusion_direction", "veto_triggers"],
+      "properties": {
+        "score": {"type": "integer", "minimum": 0, "maximum": 100},
+        "verdict": {"enum": ["PASS", "WARN", "VETO"]},
+        "conclusion_direction": {"enum": ["POSITIVE", "NEUTRAL", "NEGATIVE"]},
+        "veto_triggers": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "summary": {"type": "string"},
+    "analysis_sections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["heading", "body"],
+        "properties": {"heading": {"type": "string"}, "body": {"type": "string"}}
+      }
+    },
+    "narrative_checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["quote_id", "assessment", "fact_ids", "analysis"],
+        "properties": {
+          "quote_id": {"type": "string"},
+          "assessment": {"enum": ["CONFIRMED", "PARTIAL", "CONTRADICTED", "UNKNOWN"]},
+          "fact_ids": {"type": "array", "items": {"type": "string"}},
+          "analysis": {"type": "string"}
+        }
+      }
+    },
+    "risks": {"type": "array", "items": {"type": "string"}},
+    "checklist_conclusions": {"type": "object", "additionalProperties": {"type": "string"}},
+    "data_usage": {"type": "string"}
+  }
+}

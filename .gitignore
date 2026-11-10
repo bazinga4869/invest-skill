@@ -5,6 +5,7 @@ data/*
 !data/experts.json
 !data/expert_checklist.json
 !data/checklist_evidence_rules.json
+!data/expert_result_v3.schema.json
 reports/
 
 # Secrets & local state
