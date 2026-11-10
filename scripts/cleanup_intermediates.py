@@ -31,6 +31,7 @@ def runtime_paths(ts_code: str, tmp_root: Path = RUNTIME_ROOT) -> set[Path]:
         f"invest_expert_run_{ts_code}.json",
         f"invest_execution_{ts_code}.json",
         f"invest_adjudication_{ts_code}.json",
+        f"invest_research_review_{ts_code}.json",
         f"invest_retry_evidence_{ts_code}.json",
     ]
     patterns = [

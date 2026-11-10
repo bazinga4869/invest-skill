@@ -162,6 +162,7 @@ def verify(report_path: str) -> dict:
             expected_names.update({
                 f"invest_verification_{expected_code}.json",
                 f"invest_adjudication_{expected_code}.json",
+                f"invest_research_review_{expected_code}.json",
             })
             execution_path = manifest_path.parent / f"invest_execution_{expected_code}.json"
             try:
@@ -301,6 +302,16 @@ def verify(report_path: str) -> dict:
                             errors.append("归档 verification receipt 验证器哈希不一致")
                     except (OSError, json.JSONDecodeError, AttributeError) as exc:
                         errors.append(f"归档 verification receipt 不可复核: {exc}")
+                    from shared.research_review import validate_review
+                    try:
+                        review = json.loads((manifest_path.parent / f"invest_research_review_{expected_code}.json").read_text(encoding="utf-8"))
+                        errors.extend(validate_review(
+                            review, ts_code=expected_code, batch_id=data_batch,
+                            draft=(manifest_path.parent / f"{expected_code}.draft.md").read_bytes(),
+                            execution=archived_execution,
+                        ))
+                    except (OSError, ValueError, AttributeError) as exc:
+                        errors.append(f"归档独立投研复核签收不可复核: {exc}")
                     adjudication_path = manifest_path.parent / f"invest_adjudication_{expected_code}.json"
                     try:
                         adjudication = json.loads(adjudication_path.read_text(encoding="utf-8"))

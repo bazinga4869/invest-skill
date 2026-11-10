@@ -577,6 +577,7 @@ def archive_run(ts_code: str, draft_file: Path,
     level3_path = RUNTIME_ROOT / f"invest_level3_{ts_code}.json"
     execution_path = RUNTIME_ROOT / f"invest_execution_{ts_code}.json"
     adjudication_path = RUNTIME_ROOT / f"invest_adjudication_{ts_code}.json"
+    research_review_path = RUNTIME_ROOT / f"invest_research_review_{ts_code}.json"
     retry_evidence_path = build_retry_evidence(ts_code)
     try:
         execution = json.loads(execution_path.read_text(encoding="utf-8"))
@@ -594,6 +595,7 @@ def archive_run(ts_code: str, draft_file: Path,
         RUNTIME_ROOT / f"invest_report_bundle_{ts_code}.json",
         execution_path,
         adjudication_path,
+        research_review_path,
         draft_file,
     ]
     missing = [str(path) for path in required if not path.exists()]
@@ -635,6 +637,7 @@ def archive_run(ts_code: str, draft_file: Path,
         RUNTIME_ROOT / f"invest_report_bundle_{ts_code}.json",
         execution_path,
         adjudication_path,
+        research_review_path,
         draft_file,
         *prompts,
         *native_prompts,
@@ -1212,6 +1215,7 @@ def _main_locked(args: argparse.Namespace, ts_code: str) -> int:
             RUNTIME_ROOT / f"invest_annual_{ts_code}.txt",
             RUNTIME_ROOT / f"invest_report_bundle_{ts_code}.json",
             RUNTIME_ROOT / f"invest_execution_{ts_code}.json",
+            RUNTIME_ROOT / f"invest_research_review_{ts_code}.json",
             REPORTS_DIR / f"{ts_code}.draft.md",
             *[RUNTIME_ROOT / f"invest_prompt_{ts_code}_{expert_id}.txt" for expert_id in EXPERTS],
             *[RUNTIME_ROOT / f"invest_native_prompt_{ts_code}_{expert_id}.txt" for expert_id in EXPERTS],
@@ -1429,6 +1433,16 @@ def _main_locked(args: argparse.Namespace, ts_code: str) -> int:
             return 1
 
         try:
+            from shared.research_review import validate_review
+            review_path = RUNTIME_ROOT / f"invest_research_review_{ts_code}.json"
+            review_errors = validate_review(
+                json.loads(review_path.read_text(encoding="utf-8")),
+                ts_code=ts_code, batch_id=expected_batch_id(ts_code),
+                draft=draft_file.read_bytes(),
+                execution=json.loads((RUNTIME_ROOT / f"invest_execution_{ts_code}.json").read_text(encoding="utf-8")),
+            )
+            if review_errors:
+                raise RuntimeError("独立投研复核未通过: " + "; ".join(review_errors))
             adjudication_receipt = build_adjudication_receipt(ts_code, draft_file)
             execution_path = record_execution(
                 ts_code, "finalize", backend="orchestrator",
@@ -1440,7 +1454,7 @@ def _main_locked(args: argparse.Namespace, ts_code: str) -> int:
             run_id, manifest_path = archive_run(
                 ts_code, draft_file, expected_hashes=protected_hashes
             )
-        except RuntimeError as exc:
+        except (RuntimeError, OSError, ValueError) as exc:
             print(f"✗ {exc}", file=sys.stderr)
             return 1
         relative_manifest = manifest_path.relative_to(REPORTS_DIR)

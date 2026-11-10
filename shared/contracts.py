@@ -19,6 +19,8 @@ BATCH_CONTRACT_FILES = (
     "data/expert_result_v3.schema.json",
     "data/experts.json",
     "scripts/assemble_report.py",
+    "scripts/research_review.py",
+    "shared/research_review.py",
     "scripts/cleanup_intermediates.py",
     "scripts/cron_prompt.txt",
     "scripts/cron_trigger.sh",
