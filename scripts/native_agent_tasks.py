@@ -936,6 +936,49 @@ def commit(code: str, phase: str, worker_id: str, child_id: str) -> dict:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
 
+def reject_precheck(code: str, worker_id: str, child_id: str, diagnostics_path: Path) -> dict:
+    """Retain a failed preflight without publishing it or consuming a commit."""
+    lock_path = RUNTIME_ROOT / f".invest_native_plan_{code}.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        _assert_contract_frozen(code)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}", child_id):
+            raise NativeTaskError("拒收必须绑定真实宿主 child-id")
+        plan = _load_plan(code)
+        if plan.get("phase") != "experts":
+            raise NativeTaskError("提交前预检拒收仅适用于 experts")
+        matches = [job for job in plan["jobs"] if job["id"] == worker_id]
+        if len(matches) != 1 or matches[0].get("committed"):
+            raise NativeTaskError("worker 不属于当前计划或已经提交")
+        job = matches[0]
+        staged = Path(job["staged_output_path"])
+        for path in (staged, diagnostics_path):
+            if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= 512 * 1024:
+                raise NativeTaskError("预检拒收需要非空、受限体积的普通 staging/diagnostics 文件")
+            try:
+                path.resolve().relative_to(RUNTIME_ROOT.resolve())
+            except ValueError as exc:
+                raise NativeTaskError("预检拒收文件必须位于本批运行时根") from exc
+        raw = staged.read_text(encoding="utf-8")
+        diagnostics = diagnostics_path.read_text(encoding="utf-8")
+        rejected = RUNTIME_ROOT / f"invest_rejected_result_{code}_{worker_id}.v3.json"
+        error_path = RUNTIME_ROOT / f"invest_native_compile_error_{code}_{worker_id}.json"
+        _atomic_text(rejected, raw)
+        _atomic_json(error_path, {"expert_id": worker_id, "error": diagnostics,
+                                 "stage": "precommit-precheck", "child_id": child_id})
+        job.update({"commit_rejected": True, "child_id": child_id,
+                    "commit_error": "提交前预检失败", "content_sha256": hashlib.sha256(staged.read_bytes()).hexdigest()})
+        _atomic_json(_plan_path(code), plan)
+        _archive_evidence(plan, f"precheck_rejected_{worker_id}")
+        record_execution(code, "experts", backend="host-native", host="current-agent",
+                         model="inherit-parent", action="PRECHECK", status="REJECTED",
+                         transaction_id=str(plan["transaction_id"]), job_id=worker_id,
+                         detail=json.dumps({"child_id": child_id, "diagnostics": diagnostics}),
+                         runtime_root=RUNTIME_ROOT)
+        return {"status": "REJECTED", "id": worker_id, "ts_code": code,
+                "next": f"python3 scripts/native_agent_tasks.py advance experts {code}"}
+
+
 def _preserve_failure(code: str, phase: str) -> str | None:
     result = subprocess.run(
         [sys.executable, "scripts/preserve_failure_evidence.py", code, phase],
@@ -1107,6 +1150,11 @@ def main() -> int:
     save.add_argument("ts_code")
     save.add_argument("worker_id")
     save.add_argument("--child-id", required=True)
+    reject = sub.add_parser("reject-precheck")
+    reject.add_argument("ts_code")
+    reject.add_argument("worker_id")
+    reject.add_argument("--child-id", required=True)
+    reject.add_argument("--diagnostics", type=Path, required=True)
     failed = sub.add_parser("note-transport-failure")
     failed.add_argument("phase", choices=PHASES)
     failed.add_argument("ts_code")
@@ -1121,6 +1169,8 @@ def main() -> int:
             payload = begin(code, args.phase, args.retry)
         elif args.command == "commit":
             payload = commit(code, args.phase, args.worker_id, args.child_id)
+        elif args.command == "reject-precheck":
+            payload = reject_precheck(code, args.worker_id, args.child_id, args.diagnostics)
         elif args.command == "note-transport-failure":
             payload = note_transport_failure(
                 code, args.phase, args.worker_id, args.detail,

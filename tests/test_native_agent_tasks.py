@@ -60,6 +60,37 @@ class NativeAgentTaskTests(unittest.TestCase):
             item.stop()
         self.tmp.cleanup()
 
+    def test_precheck_rejection_retains_raw_and_allows_terminal_failure(self):
+        plan = native.begin(CODE, "experts", False)
+        staged = Path(plan["jobs"][0]["staged_output_path"])
+        staged.write_text('{"decision": {"score": 62}}', encoding="utf-8")
+        diagnostic = self.root / "precheck.txt"
+        diagnostic.write_text("unsourced_claims: 原始诊断", encoding="utf-8")
+        rejected = native.reject_precheck(CODE, self.expert, "native-child-123", diagnostic)
+        self.assertEqual(rejected["status"], "REJECTED")
+        self.assertFalse((self.root / f"invest_result_{CODE}_{self.expert}.md").exists())
+        self.assertTrue(staged.exists())
+        saved = native._load_plan(CODE)["jobs"][0]
+        self.assertTrue(saved["commit_rejected"])
+        self.assertEqual(saved["child_id"], "native-child-123")
+        with patch.object(native, "_validate_phase", return_value=(False, "precheck rejected")), \
+             patch.object(native, "_preserve_failure", return_value=None):
+            terminal = native.advance(CODE, "experts")
+        self.assertEqual(terminal["status"], "FAIL")
+        self.assertIn("--retry", terminal["next"])
+        archived = list(self.root.glob("invest_native_archive_*/*compile_error*.json"))
+        self.assertTrue(archived)
+        self.assertIn("unsourced_claims", archived[0].read_text())
+
+    def test_precheck_rejection_requires_diagnostics_inside_runtime(self):
+        plan = native.begin(CODE, "experts", False)
+        Path(plan["jobs"][0]["staged_output_path"]).write_text("{}", encoding="utf-8")
+        with tempfile.TemporaryDirectory() as outside:
+            path = Path(outside) / "diagnostics.txt"
+            path.write_text("failure", encoding="utf-8")
+            with self.assertRaises(native.NativeTaskError):
+                native.reject_precheck(CODE, self.expert, "native-child-123", path)
+
     def test_plan_inherits_parent_without_provider_selection(self):
         plan = native.begin(CODE, "experts", False)
         self.assertEqual(plan["mode"], "host-native")

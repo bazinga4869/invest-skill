@@ -8,9 +8,13 @@
 provider/model 覆盖，使子代理继承主 agent 的模型路由、认证、配额和会话谱系。不得从
 DSH 主会话另启 Codex/Claude CLI，也不得从 Codex/Claude 主会话另启其他产品。
 
+prepare 后必须先运行 `"${INVEST_PANEL_TOOLS:?}/injection_gate.py" --runtime <本批绝对运行目录> --code <code>`，确认七份 prompt 的必须规则串与 batch_id；未通过或工具不可用不得 begin。注入检查不允许改动冻结任务书。
+
 `scripts/native_agent_tasks.py begin <phase> <code>` 在任何子代理调用前完成任务书、批次、
 运行锁和重试门禁，并输出 `jobs[]`。每个子代理只读 `prompt_path`，把完整文档写入
 `staged_output_path`；主 agent 不得在 `jobs[].instruction` 外追加语义指令，随后逐项以 `commit ... --child-id <host-child-id>` 绑定真实宿主委派回执，最后 `advance` 运行机器校验。计划同时记录 prompt/instruction/staging hash、bytes 和估算 token；超限或含未解析占位符时在委派前失败。专家唯一重试中的后续修复轮由 `advance` 返回 `CONTINUE + jobs[]`，不会重跑已通过专家。
+
+专家 staging 必须是 ExpertResult v3 JSON；编排方提交前先以 `expert_result_v3.py compile` 渲染到每专家独占的检查路径，再以 `${INVEST_PANEL_TOOLS}/gate_precheck.py <渲染后的.md> --expert <expert>` 预检。两步 exit 0 才 commit；失败件以 `native_agent_tasks.py reject-precheck <code> <expert> --child-id <真实child-id> --diagnostics <本批运行时内诊断文件>` 留存原始输出和完整诊断，不发布失败件；全部 jobs 登记后再 advance 进入唯一修复。不能直接检查 JSON，也不能让专家运行 shell。frontmatter/source/calc 由编译器渲染，不能要求专家手写。
 
 宿主没有原生子代理能力时直接停止；绝不自动选择系统 PATH 上恰好存在的模型 CLI。
 `run_experts.sh`、`run_challenges.sh`、`run_cross_reviews.sh` 仅是显式兼容层，必须由用户明确
