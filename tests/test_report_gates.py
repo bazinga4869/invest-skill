@@ -624,7 +624,14 @@ class ReportGateTests(unittest.TestCase):
             self.assertEqual(result["date_issues"], [])
 
     def test_adjudication_yaml_is_structurally_validated(self):
-        knowledge_hash = hashlib.sha256((WIKI_ROOT / "index.md").read_bytes()).hexdigest()
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        wiki = Path(temp.name)
+        (wiki / "index.md").write_text("Research methodology fixture", encoding="utf-8")
+        patcher = patch("scripts.assemble_report.WIKI_ROOT", wiki)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        knowledge_hash = hashlib.sha256((wiki / "index.md").read_bytes()).hexdigest()
         valid = f"""## 综合裁决 — 裁判长
 
 ```yaml
@@ -636,8 +643,10 @@ adjudicator:
   vetoes_triggered: []
   review_resolutions: []
   position_advice:
-    existing_position_action: ADD
-    new_allocation_pct: 5
+    scope: general_research
+    user_context: null
+    existing_position_action: NONE
+    new_allocation_pct: 0
     max_allocation_pct: 10
     entry_strategy: 分批建仓
     stop_conditions: [基本面恶化]
@@ -655,7 +664,24 @@ adjudicator:
 **加权评分计算过程**
 """
         self.assertEqual(validate_adjudication(valid), [])
+        self.assertEqual(validate_adjudication(valid.replace("verdict: BUY", "verdict: PASS")), [])
         self.assertTrue(validate_adjudication(valid.replace("verdict: BUY", "verdict: MAYBE")))
+        for changed in (
+            valid.replace("existing_position_action: NONE", "existing_position_action: ADD"),
+            valid.replace("new_allocation_pct: 0", "new_allocation_pct: 5"),
+            valid.replace("scope: general_research", "scope: personalized"),
+            valid.replace("scope: general_research", "scope: ambiguous"),
+        ):
+            self.assertTrue(validate_adjudication(changed))
+        context = {"authorized_personalized": True, "request": "用户明确请求仓位建议",
+                   "holdings": {"000001.SZ": 5}, "risk_tolerance": "低",
+                   "investment_horizon": "长期", "capital_base": 100000}
+        personalized = valid.replace("scope: general_research", "scope: personalized").replace(
+            "user_context: null", "user_context: " + json.dumps(context, ensure_ascii=False))
+        with patch("scripts.assemble_report.load_data_summary", return_value={"user_context": context}):
+            self.assertEqual(validate_adjudication(personalized, ts_code="000001.SZ"), [])
+        with patch("scripts.assemble_report.load_data_summary", return_value={}):
+            self.assertTrue(validate_adjudication(personalized, ts_code="000001.SZ"))
 
     def test_manifest_detects_tampering(self):
         with tempfile.TemporaryDirectory() as temp:

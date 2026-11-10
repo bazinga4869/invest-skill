@@ -907,6 +907,7 @@ def build_report(ts_code: str, name: str, results: dict, data: dict,
 ```yaml
 ---
 adjudicator:
+  identity: null  # 具体裁判身份；独立复核签收将绑定该身份
   verdict: [HOLD / PASS / BUY / SELL / OBSERVE / REDUCE / AVOID]  # 裁判长填写
   composite_score: {composite_str}
   composite_score_raw: {raw_str}
@@ -917,9 +918,11 @@ adjudicator:
   conflicts: []  # 裁判长填写
   review_resolutions: []  # 非 UNCHANGED/CONFIRM 的二、三级意见必须逐项登记采纳/驳回及影响
   position_advice:
+    scope: general_research  # 通用研究情景，不是用户实盘指令
+    user_context: null  # 个性化须与数据快照 user_context 一致
     existing_position_action: NONE  # NONE / KEEP / ADD / REDUCE / EXIT
     new_allocation_pct: 0
-    max_allocation_pct: 0  # 总仓位上限；受评分档位约束
+    max_allocation_pct: 0  # 研究情景上限；非实盘配置指令，受评分档位约束
     entry_strategy: 待裁判长填写
     stop_conditions: []
   watch_items: []
@@ -1050,6 +1053,28 @@ def validate_adjudication(draft: str, results: dict | None = None,
     if not isinstance(position, dict):
         problems.append("综合裁决 position_advice 必须是映射")
         position = {}
+    scope = position.get("scope")
+    user_context = position.get("user_context")
+    if scope not in {"general_research", "personalized"}:
+        problems.append("position_advice.scope 必须明确为 general_research/personalized")
+    if scope == "general_research":
+        if user_context is not None:
+            problems.append("general_research 的 user_context 必须为 null")
+        if position.get("new_allocation_pct") != 0 or position.get("existing_position_action") != "NONE":
+            problems.append("无用户上下文的通用研究只能 new_allocation_pct=0、existing_position_action=NONE；max 为情景上限")
+    elif scope == "personalized":
+        frozen_context = (load_data_summary(ts_code) or {}).get("user_context") if ts_code else None
+        required_context = ("request", "holdings", "risk_tolerance", "investment_horizon", "capital_base")
+        if (not isinstance(user_context, dict) or user_context != frozen_context
+                or user_context.get("authorized_personalized") is not True
+                or any(key not in user_context or user_context[key] is None for key in required_context)
+                or any(not isinstance(user_context.get(key), str) or not user_context[key].strip()
+                       for key in ("request", "risk_tolerance", "investment_horizon"))
+                or not isinstance(user_context.get("holdings"), (dict, list))
+                or isinstance(user_context.get("capital_base"), bool)
+                or not isinstance(user_context.get("capital_base"), (int, float))
+                or not 0 < user_context["capital_base"] < float("inf")):
+            problems.append("拒绝个性化仓位请求：缺少同批次冻结且明确授权的完整用户上下文")
     allocation = position.get("max_allocation_pct")
     new_allocation = position.get("new_allocation_pct")
     existing_action = str(position.get("existing_position_action") or "")
@@ -1124,8 +1149,6 @@ def validate_adjudication(draft: str, results: dict | None = None,
     if isinstance(new_allocation, (int, float)) and not isinstance(new_allocation, bool):
         if verdict in {"HOLD", "OBSERVE", "SELL", "REDUCE", "AVOID"} and new_allocation != 0:
             problems.append(f"{verdict} 的 new_allocation_pct 必须为 0")
-        if verdict in {"BUY", "PASS"} and new_allocation <= 0:
-            problems.append(f"{verdict} 的 new_allocation_pct 必须大于 0")
     allowed_actions = {
         "HOLD": {"NONE", "KEEP"},
         "OBSERVE": {"NONE", "KEEP"},
