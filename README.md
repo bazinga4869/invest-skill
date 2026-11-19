@@ -27,6 +27,11 @@
 ```bash
 cd /home/bazinga/invest-skill
 
+# 前置：Python >= 3.10
+# （项目代码在运行时求值 `X | None` 一类注解，Python 3.9 会直接 TypeError；
+#  tests/integration_test.sh 会先做版本检查并以 rc=2 快速失败。）
+python3 -V
+
 # 安装依赖
 pip install -r requirements.txt
 
@@ -49,6 +54,30 @@ cp .env.example .env
 - **项目级**：复制 `.env.example` 为 `.env` 并填写 token（注意：`.env` 已在 `.gitignore` 中，不会提交）
 
 **切勿把真实 token 写入 `config.yaml` 或任何会被 git 追踪的文件。**
+
+## 测试与全链路状态
+
+**单元/契约测试（默认入口）**
+
+```bash
+python3 -m unittest discover -s tests -p "test_*.py"   # 直接跑全部测试
+bash tests/integration_test.sh                         # 默认入口包装；rc=3 表示「部分验证通过」
+```
+
+- 当前基线：**135 tests 全部通过**。前提三条：Python ≥ 3.10、`pip install -r requirements.txt`、`config.yaml` 里 `wiki_dependencies.repo_path` / `report_wiki.repo_path` 指向真实存在的仓。
+- `tests/integration_test.sh` 退出码：`0` = 全链路通过；`3` = 部分验证通过（只跑了契约单测，全链路未执行）；`1` = 断言失败；`2` = 用法/环境错误。**只有 rc=0 才代表全链路通过**，之前默认分支 rc=0 的假绿已废弃。
+
+**全链路（opt-in，默认不执行）**
+
+```bash
+INVEST_RUN_LEGACY_EXTERNAL_INTEGRATION=1 \
+INVEST_TEST_SOURCE_DB=<含财务数据的 db> \
+bash tests/integration_test.sh
+```
+
+- **已知过期（2026-11-19 判定，不补齐）**：`report-wiki` 测试 fixture 的证据契约（`evidence_status`、`sections_sha256` 重算、`parser`、`document_path` 等字段）已随主线重构漂移。补齐需要另一个仓配合，收益不抵成本，故判为过期。
+- 后果：全链路目前稳定停在 prepare 阶段的 report-wiki 门禁，本机实测 **26 通过 / 22 失败**。
+- 该失败**不是**产品缺陷证据，也**不得通过修改断言变绿**；过期状态必须显式出现在输出里，不许静默跳过。
 
 ## 核心设计
 

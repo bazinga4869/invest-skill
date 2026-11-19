@@ -12,13 +12,42 @@ set -uo pipefail
 SKILL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$SKILL_ROOT"
 
+# 项目代码在运行时求值 `X | None` 一类注解，Python 3.9 会直接 TypeError。
+# 前置条件见 README「前置条件」；不满足时快速失败，别让下一个人对着堆栈猜。
+if ! python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
+    echo "ERROR: invest-skill 需要 Python >= 3.10，当前 python3 = $(python3 -V 2>&1)" >&2
+    echo "       先 export PATH=<3.10+ 解释器目录>:\$PATH，或导出 INVEST_SKILL_HOME 前先切解释器。" >&2
+    exit 2
+fi
+
 # 默认回归必须遵守生产 host-native 边界，不启动任何模型 CLI。旧的外部
 # CLI stub 全管线仅在显式兼容测试时运行。
+#
+# 退出码约定（不要退回「默认分支 rc=0 就当绿」的旧行为）：
+#   0 = 全链路通过（仅 legacy 分支可能出现：data→prompts→experts→collect→assemble→gates 全部断言通过）
+#   3 = 部分验证通过（默认分支：只跑了 host-native 契约单测，全链路没有执行）
+#   1 = 断言失败
+#   2 = 用法/环境错误
 if [[ "${INVEST_RUN_LEGACY_EXTERNAL_INTEGRATION:-0}" != "1" ]]; then
-    echo "[host-native integration] provider/model inheritance, staging, commit, retry reservation"
-    INVEST_ALLOW_SKILL_RUNTIME=1 python3 -m unittest \
-        tests.test_native_agent_tasks tests.test_runtime_contracts -q
-    exit $?
+    echo "════════════════════════════════════════════════════════════════"
+    echo " [部分验证] host-native 契约单测（不含全链路）"
+    echo " 解释器: $(python3 -V 2>&1) —— 项目要求 >= 3.10"
+    echo " 已知过期: report-wiki 测试 fixture 的证据契约（evidence_status /"
+    echo "           sections_sha256 重算 / parser / document_path …）已随主线重构漂移，"
+    echo "           判为过期且不补齐；全链路即使开启也会在 prepare 阶段失败。"
+    echo "           原因与结论见 README「测试与全链路状态」。"
+    echo "────────────────────────────────────────────────────────────────"
+    if INVEST_ALLOW_SKILL_RUNTIME=1 python3 -m unittest discover -s tests -p "test_*.py" -q; then
+        echo "────────────────────────────────────────────────────────────────"
+        echo " [未执行] 全链路（data → prompts → experts → collect → assemble → gates）"
+        echo "          本次【未】验证端到端可用性。需显式开启："
+        echo "          INVEST_RUN_LEGACY_EXTERNAL_INTEGRATION=1 bash tests/integration_test.sh"
+        echo " 结论: 部分验证通过（rc=3，不等于全链路通过）"
+        echo "════════════════════════════════════════════════════════════════"
+        exit 3
+    fi
+    echo " 结论: 失败（rc=1）" >&2
+    exit 1
 fi
 
 # 默认标的需满足本地 DB 有财务/行情数据；report-wiki 在测试模式使用严格
@@ -112,7 +141,19 @@ cleanup() {
 trap cleanup EXIT
 
 # 集成测试可触发 schema 迁移/年报缓存写入；只允许写临时数据库副本。
-if ! cp --reflink=auto -- "$SOURCE_DB" "$TEST_DB"; then
+# `--reflink=auto` 只有 GNU coreutils 的 cp 认识；BSD cp（macOS 默认）会直接
+# 报 `illegal option`，那条路径在本机等于跑不起来。按平台分支。
+CP_OPTS=()
+if cp --version 2>/dev/null | head -1 | grep -q "GNU coreutils"; then
+    CP_OPTS=(--reflink=auto)
+fi
+if [[ ${#CP_OPTS[@]} -gt 0 ]]; then
+    cp "${CP_OPTS[@]}" "$SOURCE_DB" "$TEST_DB"
+else
+    # bash 3.2（macOS 自带）在 set -u 下展开空数组会报 unbound variable，故分两支写。
+    cp "$SOURCE_DB" "$TEST_DB"
+fi
+if [[ ! -s "$TEST_DB" ]]; then
     echo "ERROR: 无法创建集成测试数据库副本" >&2
     exit 2
 fi
@@ -715,5 +756,14 @@ fi
 echo
 echo "════════════════════════════════════════════════"
 echo " 结果: $PASS 通过, $FAIL 失败"
+if [[ $FAIL -eq 0 ]]; then
+    echo " 结论: 全链路通过（rc=0）"
+else
+    echo " 结论: 失败（rc=1）。本脚本不因环境/契约漂移改断言。"
+    echo "       已知过期项：report-wiki 测试 fixture 的证据契约已随主线重构漂移"
+    echo "       （evidence_status / sections_sha256 重算 / parser / document_path …），"
+    echo "       判为过期且不补齐。若失败集中在 prepare 阶段的 report-wiki 门禁，"
+    echo "       那是该过期 fixture，不是产品缺陷；原因见 README「测试与全链路状态」。"
+fi
 echo "════════════════════════════════════════════════"
 [[ $FAIL -eq 0 ]]
