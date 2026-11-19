@@ -29,6 +29,8 @@ lead 批准的范围：把 batch 08 的 5 个 `gate_precheck` FAIL + 1 个 `expe
 
 `repair01/batch.json` 的 `precommit_gate_summary` 即上表右列，`execution_status: PRECOMMIT_GATE_PASS`，`stop_reason` 明确写出「未 commit、未 advance」。
 
+**口径**：这里的「全绿」只指 `precommit_gate_summary` 七位专家的 `compile` + `precheck`。同一 `checks` 块里仍有 `data_quality: WARN`（3 条）、`report_wiki.summary_status: UNAVAILABLE`、`sage_wiki: DEGRADED`，与本轮无关也未修；对外只能说「**专家 precommit 门禁 7/7**」，不能说「批次门禁全绿」。
+
 **修复后正文数值与修复前完全一致**：6 个 UNTRACED 数（0.7亿、8.2738、6.9478、25.77%、23.08%、16.62亿、12.0863、3.3897、225.67亿…）在渲染文本里仍是同一批值，[source]/[calc] 标签仍指向同一事实路径。全仓 `git diff` 级差异：financial-auditor 1 句、value-valuator 3 句、moat-analyst 1 句、cognitive-controller 1 句、macro-cyclist 1 句、growth-assessor 11 个 calc token，其余字节不变。
 
 ## 3. 逐条修复对照
@@ -71,18 +73,23 @@ lead 批准的范围：把 batch 08 的 5 个 `gate_precheck` FAIL + 1 个 `expe
 
 ```bash
 R=/Users/bazinga/.dsh/bot/workspace/invest/invest-skill-runtime
-S=/Volumes/MacData/workspace/invest
+S=/Volumes/MacData/workspace/invest-skill            # skill 本体（有 scripts/collect_results.py）
+K=/Volumes/MacData/workspace/invest/invest-kb        # 知识库/专家面板（有 04_stock-analysis-expert/tools）
 PY=<python>=3.11 解释器
 
 # 渲染（同 batch08 流程；失败时 stdout 为 {"status":"ERROR",...} 且 rc=2）
-INVEST_RUNTIME_DIR=$R $PY $S/invest-skill/scripts/expert_result_v3.py compile 603605.SH <expert> \
+INVEST_RUNTIME_DIR=$R $PY $S/scripts/expert_result_v3.py compile 603605.SH <expert> \
     $R/batches/603605.SH-20261014-08-repair01/staging/<expert>.repair.v3.json \
     --sidecar /tmp/<expert>.v3.json --markdown /tmp/<expert>.md
 
-# 权威门禁
-$PY $S/invest-kb/04_stock-analysis-expert/tools/gate_precheck.py /tmp/<expert>.md \
-    --expert <expert> --skill-root $S/invest-skill --runtime $R
+# 权威门禁（--skill-root 必须是 $S，不是 $K；给错会 rc=2「✗ skill 根目录不对」）
+$PY $K/04_stock-analysis-expert/tools/gate_precheck.py /tmp/<expert>.md \
+    --expert <expert> --skill-root $S --runtime $R
 ```
+
+> 勘误（2026-11-19，investQA 复核发现）：本节初版把 skill 根写成 `$S/invest-skill`（`S=/Volumes/MacData/workspace/invest`），
+> 该路径不存在，照抄会 7/7 全 rc=2。skill 本体与 `invest-kb` 是**同级不同目录**，已按实际路径拆成 `$S` / `$K`。
+> 门禁结论不受影响：换成真实根后 7/7 rc=0，负控仍逐条复现。
 
 负控：把上面第二步的输入换成 batch08 既有 `checks/<expert>.md`，六位 rc=1（untraced 1/3/1/1/1 + management rc=0），与 `batch.json` 记录一致。
 
@@ -92,6 +99,12 @@ $PY $S/invest-kb/04_stock-analysis-expert/tools/gate_precheck.py /tmp/<expert>.m
 2. **单位口径变化**：value-valuator 的「粗略差额」由「个百分点」改为 `%`（`calculation_unit()` 只有 `%` 一档，无一档可表达百分点）。数值 6.9478 不变，语义上「PE 倒数 − SHIBOR」本就是两个百分数的差，写 `%` 不失真，但与原文表述不同，属**已披露的措辞变更**。
 3. **未验证项**：`commit`、`advance`、challenges、cross-review、裁决、`assemble_report`、report-wiki 物化、manifest 校验、复核签收、发布一律未跑；因此本次**不是**全链路 PASS、不是批次验收，也不代表 `execution_status` 可推进。
 4. **既有瑕疵未修**：value-valuator 原文 `{{F149}}%` 渲染成 `1.326% [source: …]%`（多余的尾随 `%`），属原始模板问题，不在本轮判词范围内，未擅自改。
+5. **repair01 非自包含**：`artifacts.prompt_bundle_validation_log` / `injection_gate_log` 仍指向 batch08 目录（同一 `data_batch_id`，语义上成立），归档或迁移时必须连同 batch08 一起带走。
+6. **`execution_status` 无校验器**：该字段在仓库代码里没有 schema 约束（batch08 的 `BLOCKED_PRECOMMIT_GATE` 同样如此），属描述性字段，不能当门禁状态机使用。
+
+## 6.1 独立复核
+
+- **investQA（独立工程 QA，2026-11-19）**：PASS。复跑 135 OK / 默认入口 rc=3 / 3.9 门槛 rc=2；确认 `4cfc351` 只改 3 个 hunk 且断言未动（legacy 分支 `ok/bad/check` 一条未改）；正向门禁 7/7 rc=0、负控逐条复现；把 7 份 staging 重新 compile 得与 `checks/*.md` **字节级相同**，证明 md 由 payload 生成而非手写；剥掉 `[source:]`/`[calc:]` 后正文数字多重集与 batch08 完全一致；batch08 全目录 mtime 未变。唯一必改项是本文件 §5 的复现路径（已勘误）。
 
 ## 7. 产物
 
