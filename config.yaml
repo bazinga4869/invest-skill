@@ -15,16 +15,21 @@ paths:
   db_file: ./data/invest_skill.db
   schema_file: ./schema.sql
 report_wiki:
-  repo_path: ../invest-report-wiki
-  cli_path: ../invest-report-wiki/bin/report-wiki
+  repo_path: /Volumes/MacData/workspace/invest/invest-report-wiki
+  cli_path: /Volumes/MacData/workspace/invest/invest-report-wiki/bin/report-wiki
   materialize_timeout_seconds: 3600
   history_years: 5
   report_types: [annual]
   evidence_only: true
   require_local_search: true
 wiki_dependencies:
-  repo_path: ../invest-kb  # 知识层：投资知识库 AI-Wiki 的桥接仓（wiki/concepts 为生成物，04_stock-analysis-expert 为面板）
-  legacy_contract_repo_path: ../invest-wiki
+  repo_path: /Volumes/MacData/workspace/invest/invest-kb  # 知识层：投资知识库 AI-Wiki 的桥接仓（wiki/concepts 为生成物，04_stock-analysis-expert 为面板）
+  # legacy 契约仓已并入 invest-kb（原 ../invest-wiki 全机不存在）；保留键位是必需的：
+  # shared/project_config.py 的 legacy_wiki_repo() 与 sage_wiki_repo() 都读这一族键，删键会让它们拿到默认值或 KeyError。
+  legacy_contract_repo_path: /Volumes/MacData/workspace/invest/invest-kb
+  # 警示：invest-sage 已无独立仓库，sage_wiki_repo() 复用的就是上面 repo_path；
+  # 不要为本键族新增引用，也不要再指向 ../invest-sage。
+  sage_repo_deprecated: true  # 已无仓库，勿新增引用
   query_timeout_seconds: 60
   cache:
     enabled: true
