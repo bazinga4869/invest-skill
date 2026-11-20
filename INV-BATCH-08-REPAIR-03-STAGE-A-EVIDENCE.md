@@ -155,13 +155,21 @@ $PY $K/04_stock-analysis-expert/tools/gate_precheck.py /tmp/<expert>.md \
 | 复核方式 | 自己重渲、自己跑权威门禁、自己算哈希：receipt §2 改前 blob `07211fcb…`(17878B) 对上；§3 的 A–E 五条判词逐条实跑复现；§5 七个 SHA-256 全部命中 |
 | 重申的边界 | `repair01` **不得作为发布来源**（同 §6.2） |
 
+### 6.4 阶段2 负控判据的收口口径（lead 2026-11-20 裁定，取代「逐条一致」的写法）
+
+原 goal 写「负控与 batch08 原判词**一致**」。该写法在本轮之后**不再原样成立**：value-valuator 用新门禁复跑会多出 `invalid_calculations 6 条`，一致性只在「仍被拦下」这一层。这不是放宽门禁，而是门禁变严的必然结果。lead 作为裁定人把判据改写为：
+
+> **五份原批次仍全部被拦（rc=1），management-auditor 仍 rc=0；任何判词差异只能来自新增的更严诊断，且必须逐条登记。**
+
+已登记的唯一差异：`value-valuator` = `untraced_numbers 3 条`（与 batch08 原判词相同）+ `invalid_calculations 6 条`（新增，命中 L35/L72 的 `]%`、`] 个百分点` 重复单位）。其余五位判词与 batch08 原记录逐条相同，`management-auditor` 仍 rc=0。
+
 ## 7. 产物
 
 `batches/603605.SH-20261014-08-repair01/`：`batch.json`、`staging/*.repair.v3.json`（7）、`checks/*.md`、`checks/*.v3.json`、`checks/*.compile.log`、`checks/*.gate-precheck.log`、`failure-archive/growth-assessor/`（失败件存档，供负控重放，见 `INV-BATCH-08-REPAIR-04-UNIT-RECEIPT.md` §7）。
 
 | 文件 | SHA-256 |
 |---|---|
-| `batch.json` | `a06d225a124b8bb90f96c989c46ae2894b3627808a2d270a809f34a808a875f5` |
+| `batch.json` | `ee08b10c64786a818e0f9817dc25efcb84990a5b1dd96277488c818ed5437666`（2026-11-20 09:25 更新；此前 `a06d225a…` 是 11-19 只含文本修复的版本，已在 `repair.unit_model_repair` 记录 11-20 重渲与 `b33af26` 绑定） |
 | `staging/financial-auditor.repair.v3.json` | `f7d25f965f69a20ce23e6ed17f4f4996b3fc543b6756b789ac3c02a46c3f3bf9` |
 | `staging/value-valuator.repair.v3.json` | `b3facab73ee235908740d9a638c3b1695805547acd8d3a4ec6b96ac9e07201a2` |
 | `staging/moat-analyst.repair.v3.json` | `611a96db11b581a2a1e32212bfa512f8f3785d27bd80093fb875ca354e6e0f04` |
