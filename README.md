@@ -78,6 +78,7 @@ bash tests/integration_test.sh
 - **已知过期（2026-11-19 判定，不补齐）**：`report-wiki` 测试 fixture 的证据契约（`evidence_status`、`sections_sha256` 重算、`parser`、`document_path` 等字段）已随主线重构漂移。补齐需要另一个仓配合，收益不抵成本，故判为过期。
 - 后果：全链路目前稳定停在 prepare 阶段的 report-wiki 门禁，本机实测 **26 通过 / 22 失败**。
 - 该失败**不是**产品缺陷证据，也**不得通过修改断言变绿**；过期状态必须显式出现在输出里，不许静默跳过。
+- **偶发 rc=2「✗ skill 根目录不对」**：在外置盘（`/Volumes/...`）上跑 `gate_precheck.py` 时，偶尔会把存在的 `scripts/collect_results.py` 判成不存在而退出 2。这是外置盘瞬时不可见/挂载抖动，不是门禁真的失败，也**不是**要改的判据：**重跑一次**即可；连续两次都 rc=2 才当环境问题排查。
 
 ## 核心设计
 

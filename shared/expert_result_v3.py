@@ -427,6 +427,17 @@ def validate_result(result: dict, *, expert_id: str, ts_code: str, data: dict,
         raise ExpertResultV3Error("分析正文过短，至少一千二百字符")
 
 
+def _join_number_unit(number: str, unit: str) -> str:
+    """数字与单位拼接：ASCII 单位（%,元/亿等半角）紧贴，中文单位留一个空格。
+
+    推导出的计算单位必须与数字可分辨，否则 `6.9478百分点` 与 `6.9478` 难以区分。
+    事实 token 的单位来自数据源、沿用既有写法不动，保证既有产物可复现。
+    """
+    if unit and ord(unit[0]) > 127:
+        return f"{number} {unit}"
+    return f"{number}{unit}"
+
+
 def _render_token(match: re.Match[str], facts: dict[str, Fact], source_map: dict) -> str:
     kind = "F" if match.group("fact") else match.group("kind")
     body = match.group("fact") or match.group("body")
@@ -444,7 +455,7 @@ def _render_token(match: re.Match[str], facts: dict[str, Fact], source_map: dict
             raise ExpertResultV3Error(f"calc 无法复算: {body}")
         unit = calculation_unit(spec, source_map)
         return (
-            f"{_format_number(float(value))}{unit} "
+            f"{_join_number_unit(_format_number(float(value)), unit)} "
             f"[calc: {normalized_formula}; inputs: {','.join(paths)}]"
         )
     value, rationale = body.split("|", 1)

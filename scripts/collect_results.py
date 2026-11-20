@@ -45,8 +45,8 @@ from shared.expert_result_v3 import (
 )
 from scripts.verify_report import (
     calculation_specs, evaluate_calculation, explicit_sources, extract_numbers,
-    detect_qualitative_contradictions, detect_unsourced, flatten_json, flatten_paths,
-    verify_number,
+    detect_qualitative_contradictions, detect_unsourced, detect_unit_conflicts,
+    flatten_json, flatten_paths, verify_number,
 )
 WIKI_ROOT = wiki_expert_root()
 WIKI_REPO = sage_wiki_repo()
@@ -445,6 +445,19 @@ def build_expert_diagnostics(
                     "line": line_no,
                     "context": context,
                 })
+
+    # 「6.9478% 个百分点」这类同一数字挂两种单位的串必须阻塞：
+    # calculation_unit 只能判 calc token 自己的单位，判不出模板字面与之打架。
+    for conflict in detect_unit_conflicts(text):
+        diagnostics["invalid_calculations"].append({
+            "formula": "",
+            "inputs": [],
+            "line": conflict["line"],
+            "context": conflict["context"],
+            "claim": conflict["claim"],
+            "kind": conflict["kind"],
+            "reason": conflict["reason"],
+        })
 
     diagnostics["qualitative_contradictions"] = [
         dict(item) for item in detect_qualitative_contradictions(text, data)

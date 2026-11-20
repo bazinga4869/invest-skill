@@ -27,8 +27,9 @@ from scripts.prepare_prompts import (
     MAX_EXPERT_PROMPT_BYTES, build_evidence_cards, format_annual_text,
 )
 from scripts.verify_report import (
-    calculation_specs, detect_unsourced, evaluate_calculation, explicit_sources,
-    extract_numbers, flatten_json, normalize_calculation_formula, verify, verify_number,
+    PERCENTAGE_POINT_UNIT, calculation_specs, calculation_unit, detect_unit_conflicts,
+    detect_unsourced, evaluate_calculation, explicit_sources, extract_numbers,
+    flatten_json, normalize_calculation_formula, verify, verify_number,
 )
 from scripts.verify_manifest import verify as verify_manifest
 from scripts.verify_manifest import EXPERTS as MANIFEST_EXPERTS
@@ -502,9 +503,64 @@ class ReportGateTests(unittest.TestCase):
         )
         self.assertFalse(any(item["line"] == 2 for item in findings))
         first_line = [item for item in findings if item["line"] == 1]
-        self.assertEqual([(item["value"], item["unit"]) for item in first_line], [(-0.4, "%")])
+        self.assertEqual(
+            [(item["value"], item["unit"]) for item in first_line],
+            [(-0.4, PERCENTAGE_POINT_UNIT)],
+        )
         range_items = [item for item in findings if item["line"] == 3]
         self.assertEqual([item["category"] for item in range_items], ["assumption", "assumption"])
+
+    def test_percentage_point_difference_is_traceable_in_percentage_points(self):
+        """两个百分数相减是百分点：单位推导与溯源都必须认这个写法。"""
+        source_map = flatten_json({
+            "market": {"earnings_gap_pct": 8.2738},
+            "macro": {"indicators": {"shibor": {"week_pct": 1.326}}},
+        })
+        spec = {
+            "formula": "market.earnings_gap_pct-macro.indicators.shibor.week_pct",
+            "inputs": [
+                "market.earnings_gap_pct",
+                "macro.indicators.shibor.week_pct",
+            ],
+        }
+        self.assertEqual(calculation_unit(spec, source_map), PERCENTAGE_POINT_UNIT)
+        finding = {
+            "value": 6.9478, "unit": PERCENTAGE_POINT_UNIT, "declared_sources": [],
+            "category": "data", "raw": "6.9478 个百分点", "context": "", "section": "",
+            "line": 1, "calculation_specs": [spec],
+        }
+        self.assertEqual(verify_number(finding, source_map)["trace_status"], "DERIVED")
+
+    def test_percent_next_to_percentage_points_is_blocked(self):
+        """同一数字既写 % 又写百分点，必须成为阻塞诊断，不能静默过关。"""
+        data = {
+            "market": {"earnings_gap_pct": 8.2738},
+            "macro": {"indicators": {"shibor": {"week_pct": 1.326}}},
+        }
+        text = (
+            "粗略差额为 6.9478% [calc: market.earnings_gap_pct-"
+            "macro.indicators.shibor.week_pct; inputs: market.earnings_gap_pct,"
+            "macro.indicators.shibor.week_pct] 个百分点\n"
+        )
+        conflicts = detect_unit_conflicts(text)
+        self.assertEqual(
+            sorted({item["kind"] for item in conflicts}),
+            ["percent_adjacent_percentage_point", "unit_duplicated_after_token"],
+        )
+        diagnostics = build_expert_diagnostics(
+            "value-valuator", text, data, checklist_result={"items": []},
+        )
+        self.assertEqual(len(diagnostics["invalid_calculations"]), len(conflicts))
+        self.assertIn(
+            "percent_adjacent_percentage_point",
+            {item.get("kind") for item in diagnostics["invalid_calculations"]},
+        )
+        # 只有字面单位重复、口径本身正确时同样要挂
+        duplicated = "短期利率 1.326% [source: macro.indicators.shibor.week_pct]%\n"
+        self.assertEqual(
+            [item["kind"] for item in detect_unit_conflicts(duplicated)],
+            ["unit_duplicated_after_token"],
+        )
 
     def test_challenge_question_numbers_are_metadata_not_company_facts(self):
         findings = extract_numbers(

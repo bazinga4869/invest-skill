@@ -473,10 +473,79 @@ def evaluate_calculation(spec: dict, source_map: dict) -> float | None:
         return None
 
 
+PERCENTAGE_POINT_UNIT = '个百分点'
+
+
+def normalize_report_unit(raw_unit: str) -> str:
+    """把报告里声明的单位归一成门禁可比较的写法。
+
+    「个百分点」与「%」是两个不同的量：两个百分数**相减**得到百分点，
+    比值或占比才得到百分号。这里不再把「百分点」无条件折成「%」，
+    否则门禁在构造上就无法区分两者（详见 detect_unit_conflicts）。
+
+    中文里「百分点」与「个百分点」是同一单位的两种写法，统一归到带量词的
+    写法（渲染也是这个形态），避免同一份报告里两种写法被判成不同单位。
+    """
+    text = (raw_unit or '').strip()
+    if not text:
+        return ''
+    if text.endswith('百分点'):
+        return PERCENTAGE_POINT_UNIT
+    return text
+
+
+def _top_level_difference(formula: str) -> tuple[str, str] | None:
+    """把 `A-B` 拆成左右两段；括号内的减号不作为差值分界。"""
+    depth = 0
+    for index, char in enumerate(formula):
+        if char == '(':
+            depth += 1
+        elif char == ')':
+            depth -= 1
+        elif char == '-' and depth == 0 and index > 0:
+            left, right = formula[:index].strip(), formula[index + 1:].strip()
+            if left and right:
+                return left, right
+    return None
+
+
+def _operand_unit(expr: str, source_map: dict, paths: list[str]) -> str | None:
+    """推定单个运算分量的单位；推不出来时返回 None（不做猜测）。"""
+    text = expr.strip()
+    while text.startswith('(') and text.endswith(')') and len(text) > 2:
+        text = text[1:-1].strip()
+    if not text:
+        return None
+    direct = source_map.get(text)
+    if direct is not None:
+        return direct[1]
+    alias_index = {'current': 0, 'a': 0, 'previous': 1, 'b': 1}
+    index = alias_index.get(text)
+    if index is None:
+        numbered = re.fullmatch(r'x(\d+)', text)
+        if numbered:
+            index = int(numbered.group(1)) - 1
+        elif re.fullmatch(r'[c-z]', text):
+            index = ord(text) - ord('a')
+    if index is not None and 0 <= index < len(paths):
+        return source_map[paths[index]][1]
+    if '/' in text and ('*100' in text or '100*' in text):
+        return '%'
+    return None
+
+
 def calculation_unit(spec: dict, source_map: dict) -> str:
     formula = re.sub(r'\s+', '', normalize_calculation_formula(spec.get('formula', '')))
     paths = [path for path in spec.get('inputs', []) if path in source_map]
     units = [source_map[path][1] for path in paths]
+    difference = _top_level_difference(formula)
+    if difference is not None:
+        left_unit = _operand_unit(difference[0], source_map, paths)
+        right_unit = _operand_unit(difference[1], source_map, paths)
+        # 两个百分数相减 = 百分点；这条必须排在「*100 比值 → %」之前，
+        # 否则 100*(1/PE)-SHIBOR 会被错标成 %。
+        if left_unit == '%' and right_unit == '%':
+            return PERCENTAGE_POINT_UNIT
     if '/' in formula and ('*100' in formula or '100*' in formula):
         return '%'
     if (any('total_share' in path.lower() for path in paths)
@@ -485,6 +554,35 @@ def calculation_unit(spec: dict, source_map: dict) -> str:
     if units and len(set(units)) == 1 and '/' not in formula:
         return units[0]
     return ''
+
+
+UNIT_CONFLICT_TAG = r'(?:\[(?:source|calc|assumption|method):[^\]]*\])?'
+# ① 同一数字先写 % 再写百分点；② 渲染 token 自带单位后，模板又跟了一个字面单位
+#    （渲染结果形如 `1.326% [source: x]%`、`6.9478 [calc: x] 个百分点`）。
+UNIT_CONFLICT_PATTERNS = (
+    (re.compile(rf'-?\d[\d,]*(?:\.\d+)?\s*%\s*{UNIT_CONFLICT_TAG}\s*个?百分点'),
+     'percent_adjacent_percentage_point',
+     '同一数字同时标注 % 与百分点：两个百分数之差应为百分点'),
+    (re.compile(r'\]\s*(?:%|个?百分点)'),
+     'unit_duplicated_after_token',
+     'token 已带单位，模板又拼了一个字面单位'),
+)
+
+
+def detect_unit_conflicts(text: str) -> list[dict]:
+    """单位自相矛盾或重复的写法必须阻塞，不能靠改字绕开门禁。"""
+    findings = []
+    for line_no, line in enumerate(text.splitlines(), 1):
+        for pattern, kind, reason in UNIT_CONFLICT_PATTERNS:
+            for match in pattern.finditer(line):
+                findings.append({
+                    'line': line_no,
+                    'claim': match.group(0).strip()[:80],
+                    'context': line.strip()[:200],
+                    'kind': kind,
+                    'reason': reason,
+                })
+    return findings
 
 
 def extract_numbers(text: str) -> list[dict]:
@@ -564,7 +662,7 @@ def extract_numbers(text: str) -> list[dict]:
         for match_index, match in enumerate(matches):
             raw_number = match.group(1).replace(',', '')
             raw_unit = match.group(2) or ''
-            unit = '%' if raw_unit.endswith('百分点') else raw_unit
+            unit = normalize_report_unit(raw_unit)
             if not unit and match.group(0).lstrip().startswith('¥'):
                 unit = '元'
             try:
