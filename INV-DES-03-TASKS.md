@@ -1110,3 +1110,9 @@
 - `DEFECT-04`：`.obsidian/` 下 4 个编辑器状态 JSON 为本地工作区文件，已加入 `.gitignore`，不入库。
 - `DEFECT-05`（已修复并随 ⑤ 提交）：`data/expert_result_v3.schema.json` 列于 `shared/contracts.py:19` 的 `BATCH_CONTRACT_FILES`，却被 `.gitignore` 的 `data/*` 规则忽略，从未入库；干净克隆缺该文件时 `native_agent_tasks` 全部 fail closed（`FileNotFoundError: 批次控制面文件缺失`）。已在 `.gitignore` 加例外并提交该 schema（SHA-256 `c3cd98c09dd44a3a9e686d35e9ec83b25c78f8b6bd0877b4fc7c73a0592c49b3`，64 行）；`data/invest_skill.db` 与 `data/*.bak-*` 仍保持忽略。
 - `DEFECT-06`：主工作树仍有 8 份未跟踪文档（3 份 `INV-BATCH-08-REPAIR-*`、`INV-DES-03-STATIC-INVENTORY-PLAN-01.md`、`INV-DES-03-STOCK-SCREENER-BOUNDARY-DESIGN.md`、`INV-DES-03-TEST-ISOLATION-DESIGN.md`、`INV-DES-05.md`、`INV-SMOKE-03-DESIGN-01.md`），本轮未纳入提交，归属与是否入库待 PM 与作者确认。
+
+### 阶段2 收口：整体判据豁免与流程失误留痕（lead 2026-11-20 裁定）
+
+- **整体判据豁免（`investQA` 私聊复核同一不可变 SHA）**：**豁免补做**，不再派人、不重开。依据：`investQA` 无法加入本群，平台目录许可墙原文 `Working in /Volumes/MacData/workspace/invest-skill was not allowed`（见上文 VERIFICATION 段），该判据不可派。替代证据链：投研复核以非实现方身份对同一不可变 SHA 独立重跑（`git archive b33af26` 干净树七位与 runtime `checks/*.md` 字节相同、`137 passed`；`5bc1a0d` 渲染的旧产物喂 `b33af26` 门禁 rc=1、`untraced_numbers 2 条`）；lead 自核负控（五份原批次 rc=1、`management-auditor` rc=0，差异仅新增 `invalid_calculations 6 条`）；`investQA` 2026-11-19 的 PASS（135 OK / 默认入口 rc=3 / 3.9 门槛 rc=2 / 正向 7/7 rc=0 / 负控逐条 / 7 份 staging 重编与 `checks/*.md` 字节相同）继续对旧版有效。**边界：三者合起来只覆盖该判据的意图，不等同于 `investQA` 本人复核最终 SHA；`investQA` 的 2026-11-19 PASS 不覆盖 `b33af26` 之后的门禁改动，也不覆盖 `22565e6` 的收口状态。**任何对外表述不得写成「investQA 已复核最终版本」。
+- **流程失误（lead 自述，留痕不删）**：2026-11-20 09:29 lead 在未先核对上述整体判据的情况下把群 goal 标记为 complete；属**流程失误**，非内容问题。内容侧判据（阶段1、阶段2）当时已由 lead 与投研复核分别独立复跑成立，故不因此回退阶段状态；但「complete 前须先核整体判据」的检查顺序此后按本记录执行。
+- **会签建议数口径（lead 2026-11-20 统一）**：以 **建议 4 条**为准（`INV-BATCH-08-REPAIR-03-STAGE-A-EVIDENCE.md` §6.3 与私聊一致）；群内那版「建议 1」只挑了 §3.3 的 `stop_reason` 归属一条，是 4 条的子集。此后引用写「建议 4，其中 §3.3 一条为群内精简单列」。三张单对应：①→`BL-01`（CI 校验 trailer）、②→已由 lead 改 HTTPS 消解、③→`INV-DEFECT-DIM-01`（量纲）、④→`REG-UNIT-01`（单位并存）。
