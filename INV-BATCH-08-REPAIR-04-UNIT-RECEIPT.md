@@ -161,8 +161,28 @@ python3.11 $K/04_stock-analysis-expert/tools/gate_precheck.py /tmp/vv.md \
 
 1. **仍不是全链路**：`commit`/`advance`/challenges/cross-review/裁决/`assemble_report`/report-wiki 物化/manifest/复核签收/发布一律未跑。
 2. **repair01 只作证据与门禁回归夹具**（lead 2026-11-20 书面决定，见 `INV-BATCH-08-REPAIR-03-STAGE-A-EVIDENCE.md` §6.2）：不得作为发布来源；对外报告必须由专家按同一判词重跑产出。
-3. **本 receipt 不覆盖**：`evaluate_calculation` 仍不校验 calc 操作数量纲（同量级量纲混用可能静默通过），属独立缺陷，未修。
-4. **推送通道**：本机 `git@github.com` SSH 公钥已不可用（`ssh-add -l` 无 identity），本次推送改用 `gh auth git-credential` 走 HTTPS；remote 仍是 SSH，**下次推送会再次失败**，需 lead 决定是恢复 SSH key 还是把 remote 改成 HTTPS。
+3. **本 receipt 不覆盖**：`evaluate_calculation` 仍不校验 calc 操作数量纲（同量级量纲混用可能静默通过），属独立缺陷，已单独立单为 `INV-DEFECT-DIM-01`（见 `INV-BACKLOG-01.md`），本次不实现。
+4. **推送通道（2026-11-20 09:20 已修复，本节为实测事实）**
+
+   - **改前**：`origin` = `git@github.com:bazinga4869/invest-skill.git`（SSH）。本机 `~/.ssh` 只有 `homelab_ops_ed25519`、`rustdesk_tunnel_ed25519`，没有 GitHub 的 key，`ssh-add -l` 无 identity，SSH 通道实际从来不通。本次两笔提交（`b33af26`、`28190f1`）是在改之前推的，靠显式 `-c credential.helper='!gh auth git-credential'` + 直接写 HTTPS URL 绕行。
+   - **改后**：`origin` = `https://github.com/bazinga4869/invest-skill.git`（HTTPS），由 lead 于 2026-11-20 09:20 +08 修改。`credential.helper=osxkeychain`（系统级，来自 CommandLineTools 的 gitconfig），`gh` 已登录 `bazinga4869`。
+   - **验证命令与结果**：
+
+     ```text
+     $ git config --get remote.origin.url
+     https://github.com/bazinga4869/invest-skill.git
+     $ git config --get credential.helper
+     osxkeychain
+     $ git ls-remote origin main
+     <sha>	refs/heads/main            # 短 sha 28190f1，与本地 origin/main 一致
+     $ GIT_TERMINAL_PROMPT=0 git push --dry-run origin main
+     Everything up-to-date
+     $ git fetch -q origin main && git rev-list --count origin/main..main
+     0
+     ```
+
+   - **一行回退**（不要执行，回退需要先造 GitHub key 并注册，属用户凭据层面）：`git remote set-url origin git@github.com:bazinga4869/invest-skill.git`
+   - **结论**：推送通道现在是 HTTPS，可直接 `git push origin main`，不需要再带 `gh auth git-credential` 那套写法。
 
 ---
 

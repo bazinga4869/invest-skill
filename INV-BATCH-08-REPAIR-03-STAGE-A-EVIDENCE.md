@@ -63,7 +63,8 @@ lead 批准的范围：把 batch 08 的 5 个 `gate_precheck` FAIL + 1 个 `expe
 
 ### 3.3 repair01 全部改动的分类表（label-only / formula / unit）
 
-**声明：repair01 只作门禁证据，不得用于发布。** 它是编排方在 batch08 文本上的改写副本，不产出报告、不进 `assemble_report`、不参与任何交付物；`batch.json` 的 `stop_reason` 与 `authorization` 已固化这一点。
+**声明：repair01 只作证据与门禁回归夹具，不得作为发布来源。** 它是编排方在 batch08 文本上的改写副本，不产出报告、不进 `assemble_report`、不参与任何交付物。
+机器记录里真正承载这一 provenance 的是 `batch.json` 的 `repair.mode: "text-only"` 与 `repair.expert_invocation: "none (no expert subagent was called; …)"`，以及 2026-11-20 补写的 `repair.unit_model_repair.provenance`；`stop_reason` 只说明「本轮未 commit/advance」，**不是**常设禁止句（投研复核 2026-11-20 指出，已按此更正）。
 
 | # | 位置 | 类型 | 改动 | 数值/来源是否变 |
 |---|---|---|---|---|
@@ -141,6 +142,18 @@ $PY $K/04_stock-analysis-expert/tools/gate_precheck.py /tmp/<expert>.md \
 - 因此 `repair01` 的状态是「门禁证据 + 回归夹具」，不是「批次产出」：它不进 `assemble_report`、不做 report-wiki 物化、不参与 manifest 校验、不发起复核签收，也不构成任何交付物。
 - 全链路是否跑、跑到哪一步，仍属用户授权范围，不由本条决定。
 - 该前提同时写入群 goal 第 3 阶段（待用户批准全链路时作为前置条件之一）。
+
+### 6.3 投研复核 会签（阶段A 证据链）
+
+| 项 | 内容 |
+|---|---|
+| 签收人 | 投研复核（只读复核，非实现方） |
+| 时间 | 2026-11-20 09:26 +08 |
+| 快照 | `28190f1`（`origin/main`，`ahead=0`） |
+| 结论 | **PASS**，阻塞 0，建议 4 条（已按 lead 归属分派，均不阻塞） |
+| 背书范围 | **仅「证据链与门禁回归」**——不背书全链路、不背书批次验收、不背书 `execution_status` 可推进 |
+| 复核方式 | 自己重渲、自己跑权威门禁、自己算哈希：receipt §2 改前 blob `07211fcb…`(17878B) 对上；§3 的 A–E 五条判词逐条实跑复现；§5 七个 SHA-256 全部命中 |
+| 重申的边界 | `repair01` **不得作为发布来源**（同 §6.2） |
 
 ## 7. 产物
 
