@@ -7,6 +7,7 @@
 | `BL-01` | CI 侧校验 `Committed-by` trailer | OPEN（等 CI 接入窗口） |
 | `INV-DEFECT-DIM-01` | `evaluate_calculation` 不校验量纲 | OPEN（只立单，不实现） |
 | `REG-UNIT-01` | token 单位与模板单位并存（`元 [calc: …]元/股`） | OPEN（登记，暂不改） |
+| `BL-02` | `gate_precheck.py` 默认 skill 根漂移到已不存在路径 | OPEN（只登记，不实现） |
 
 状态词只有三个：`OPEN`（已登记待做）、`WAITING_USER`（等用户授权）、`DONE`（有提交与复核证据）。
 
@@ -91,5 +92,19 @@ Committed-by: <bot-name>
 3. **改了会动全部历史产物**：模板一改，所有历史 `checks/*.md` 的字节与 sha256 全变，已签收的证据链要整体重算——超出本批范围。
 
 **何时处理**：与 `INV-DEFECT-DIM-01` 一起在阶段 3 评估——量纲模型落地时，顺带决定模板单位该由谁提供（token 还是模板），二者只能有一个来源。
+
+**登记位置**：本节；不另建单。
+
+## BL-02：`gate_precheck.py` 默认 skill 根漂移
+
+**现象**：不传 `--skill-root` 时，`gate_precheck.py` 默认把 skill 根推导为 `/Volumes/MacData/workspace/invest/invest-skill`，输出 `✗ skill 根目录不对：/Volumes/MacData/workspace/invest/invest-skill`，退出码 **rc=2**，门禁无法运行。
+
+**事实边界**：该目录在仓库搬迁后已不存在（`ls` 为 `No such file or directory`）；显式传入 `--skill-root` 后门禁正常。**不得反推**为「门禁失效」——带参即恢复，本轮回执与七位重跑全部是带 `--skill-root` 跑的。
+
+**归属**：与阶段1 修复的「外部仓路径漂移」同类隐患（配置/默认值写死旧路径）。由投研复核在终态会签中提出，lead 2026-11-20 授权登记为 `BL-02`。
+
+**为什么现在不改**：属门禁脚本默认值，改它会动到评测侧与面板仓调用约定；阶段2 只做单位模型，不扩范围。
+
+**何时处理**：阶段 3（全链路，待用户批准）评估——届时与 `config.yaml` 路径策略一起改为按仓根推导或要求显式传入并给出清晰报错。
 
 **登记位置**：本节；不另建单。
